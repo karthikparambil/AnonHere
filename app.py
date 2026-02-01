@@ -13,7 +13,7 @@ except ImportError:
     psycopg2 = None
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24)) 
 DB_FILE = 'anonchat.db'
 
 
@@ -145,6 +145,7 @@ HTML_TEMPLATE = """
 </head>
 <body class="h-screen flex flex-col items-center justify-center {{ 'p-4' if not session.get('username') or not session.get('room_type') else '' }}">
 
+    <!-- Login View -->
     {% if not session.get('username') %}
     <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">ANON_HERE</h1>
@@ -161,6 +162,7 @@ HTML_TEMPLATE = """
         </form>
     </div>
 
+    <!-- Lobby View -->
     {% elif not session.get('room_type') %}
     <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-xl font-bold text-center mb-2 text-white tracking-widest uppercase">AnonHere</h1>
@@ -209,6 +211,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
     
+    <!-- Chat View -->
     {% else %}
     <div class="w-full h-full flex flex-col bg-black overflow-hidden border-x border-white/10">
         <div class="bg-black p-4 border-b border-white flex justify-between items-center">
@@ -319,7 +322,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
 @app.route('/')
 def home():
     if 'username' in session and 'room_type' in session:
@@ -368,7 +370,11 @@ def join_room():
     code = request.form.get('room_code')
     if not code: return redirect(url_for('home'))
     
-    if not check_rate_limit(request.remote_addr, 'join_fail', 5, 60):
+    from flask import flash
+    
+    user_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+
+    if not check_rate_limit(user_ip, 'join_fail', 5, 60):
         from flask import flash
         flash("SECURITY LOCKOUT // TOO MANY FAILED ATTEMPTS")
         return redirect(url_for('home'))
@@ -401,8 +407,10 @@ def api_messages():
     room_id = str(room_code) if room_code else 'global'
     update_presence(room_id, session['username'])
     
+    user_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    
     if request.method == 'POST':
-        if not check_rate_limit(request.remote_addr, 'send_msg', 5, 10):
+        if not check_rate_limit(user_ip, 'send_msg', 5, 10):
             return jsonify({"error": "Rate limit exceeded"}), 429
 
         content = request.get_json().get('content')
@@ -424,4 +432,4 @@ def api_messages():
     })
 
 if __name__ == '__main__':
-    app.run(debug=False, port=5000)
+    app.run(debug=True, port=5000)

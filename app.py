@@ -3,13 +3,14 @@ import sqlite3
 import json
 import time
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify
 
 # Configuration
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-DB_FILE = 'anonchat.db'
+# Use /tmp directory for serverless environment
+DB_FILE = '/tmp/anonchat.db'
 
 # --- Security / Rate Limiting ---
 # Simple in-memory rate limiter. 
@@ -93,34 +94,54 @@ def get_active_count(room_id):
 def get_db_connection():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    
+    # Register datetime adapters for SQLite
+    def adapt_datetime(dt):
+        return dt.isoformat()
+    
+    def convert_datetime(val):
+        return datetime.fromisoformat(val.decode())
+    
+    sqlite3.register_adapter(datetime, adapt_datetime)
+    sqlite3.register_converter("DATETIME", convert_datetime)
+    
     return conn
 
 def init_db():
     """Initialize the database with messages and rooms tables."""
-    conn = get_db_connection()
-    # For dev simplicity, we drop tables to handle schema changes
-    conn.execute('DROP TABLE IF EXISTS messages')
-    conn.execute('DROP TABLE IF EXISTS rooms')
-    
-    conn.execute('''
-        CREATE TABLE rooms (
-            code INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    conn.execute('''
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            content TEXT NOT NULL,
-            room_code INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        # For dev simplicity, we drop tables to handle schema changes
+        conn.execute('DROP TABLE IF EXISTS messages')
+        conn.execute('DROP TABLE IF EXISTS rooms')
+        
+        conn.execute('''
+            CREATE TABLE rooms (
+                code INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.execute('''
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                content TEXT NOT NULL,
+                room_code INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Connect with datetime parsing
+        conn = sqlite3.connect(DB_FILE, detect_types=sqlite3.PARSE_DECLTYPES)
+        conn.row_factory = sqlite3.Row
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+        return False
 
 def cleanup_old_messages():
     """
@@ -128,7 +149,7 @@ def cleanup_old_messages():
     Also cleans up old rate limit data to prevent memory leak.
     """
     conn = get_db_connection()
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     
     conn.execute("DELETE FROM messages WHERE timestamp < ?", (one_hour_ago,))
     conn.execute("DELETE FROM rooms WHERE created_at < ?", (one_hour_ago,))
@@ -149,9 +170,17 @@ def cleanup_old_messages():
         if empty:
             del RATE_LIMITS[ident]
 
-# Initialize DB on start
-if not os.path.exists(DB_FILE):
-    init_db()
+# Database initialization will be handled on first request
+DB_INITIALIZED = False
+
+def ensure_db_initialized():
+    """Ensure database is initialized."""
+    global DB_INITIALIZED
+    if not DB_INITIALIZED:
+        if init_db():
+            DB_INITIALIZED = True
+        else:
+            print("Failed to initialize database")
 
 # --- Frontend Template (HTML/CSS/JS) ---
 HTML_TEMPLATE = """
@@ -575,6 +604,7 @@ def leave_room():
 
 @app.route('/api/messages', methods=['GET', 'POST', 'DELETE'])
 def api_messages():
+    ensure_db_initialized()
     cleanup_old_messages()
     
     # Validate session ownership
@@ -633,7 +663,7 @@ def api_messages():
         if content:
             conn = get_db_connection()
             conn.execute('INSERT INTO messages (username, content, room_code, timestamp) VALUES (?, ?, ?, ?)',
-                         (username, content, room_code, datetime.utcnow()))
+                         (username, content, room_code, datetime.now(timezone.utc)))
             conn.commit()
             conn.close()
             return jsonify({"status": "sent"})

@@ -3,14 +3,13 @@ import sqlite3
 import json
 import time
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify
 
 # Configuration
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-# Use /tmp directory for serverless environment
-DB_FILE = '/tmp/anonchat.db'
+DB_FILE = 'anonchat.db'
 
 # --- Security / Rate Limiting ---
 # Simple in-memory rate limiter. 
@@ -76,72 +75,56 @@ def update_presence(room_id, username):
         LAST_SEEN[room_id] = {}
     LAST_SEEN[room_id][username] = now
 
-def get_active_count(room_id):
-    """Returns count of users seen in the last 10 seconds."""
+def get_active_users(room_id):
+    """Returns list of active users seen in the last 10 seconds."""
     if room_id not in LAST_SEEN:
-        return 0
+        return []
     
     now = time.time()
-    # Filter and count
+    # Filter and get active users
     active_users = [u for u, t in LAST_SEEN[room_id].items() if now - t < 10]
     
     # Optional: cleanup old
     LAST_SEEN[room_id] = {u: t for u, t in LAST_SEEN[room_id].items() if now - t < 10}
     
-    return len(active_users)
+    return active_users
+
+def get_active_count(room_id):
+    """Returns count of users seen in the last 10 seconds."""
+    return len(get_active_users(room_id))
 
 # --- Database Management ---
 def get_db_connection():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
-    
-    # Register datetime adapters for SQLite
-    def adapt_datetime(dt):
-        return dt.isoformat()
-    
-    def convert_datetime(val):
-        return datetime.fromisoformat(val.decode())
-    
-    sqlite3.register_adapter(datetime, adapt_datetime)
-    sqlite3.register_converter("DATETIME", convert_datetime)
-    
     return conn
 
 def init_db():
     """Initialize the database with messages and rooms tables."""
-    try:
-        conn = get_db_connection()
-        # For dev simplicity, we drop tables to handle schema changes
-        conn.execute('DROP TABLE IF EXISTS messages')
-        conn.execute('DROP TABLE IF EXISTS rooms')
-        
-        conn.execute('''
-            CREATE TABLE rooms (
-                code INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.execute('''
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                content TEXT NOT NULL,
-                room_code INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Connect with datetime parsing
-        conn = sqlite3.connect(DB_FILE, detect_types=sqlite3.PARSE_DECLTYPES)
-        conn.row_factory = sqlite3.Row
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Database initialization error: {e}")
-        return False
+    conn = get_db_connection()
+    # For dev simplicity, we drop tables to handle schema changes
+    conn.execute('DROP TABLE IF EXISTS messages')
+    conn.execute('DROP TABLE IF EXISTS rooms')
+    
+    conn.execute('''
+        CREATE TABLE rooms (
+            code INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.execute('''
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            content TEXT NOT NULL,
+            room_code INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 def cleanup_old_messages():
     """
@@ -149,7 +132,7 @@ def cleanup_old_messages():
     Also cleans up old rate limit data to prevent memory leak.
     """
     conn = get_db_connection()
-    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
     
     conn.execute("DELETE FROM messages WHERE timestamp < ?", (one_hour_ago,))
     conn.execute("DELETE FROM rooms WHERE created_at < ?", (one_hour_ago,))
@@ -170,17 +153,9 @@ def cleanup_old_messages():
         if empty:
             del RATE_LIMITS[ident]
 
-# Database initialization will be handled on first request
-DB_INITIALIZED = False
-
-def ensure_db_initialized():
-    """Ensure database is initialized."""
-    global DB_INITIALIZED
-    if not DB_INITIALIZED:
-        if init_db():
-            DB_INITIALIZED = True
-        else:
-            print("Failed to initialize database")
+# Initialize DB on start
+if not os.path.exists(DB_FILE):
+    init_db()
 
 # --- Frontend Template (HTML/CSS/JS) ---
 HTML_TEMPLATE = """
@@ -325,8 +300,8 @@ HTML_TEMPLATE = """
         <!-- Input Area -->
         <div class="bg-black p-4 border-t border-white">
             <form id="chat-form" class="flex space-x-2">
-                <input type="text" id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off"
-                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
+                <textarea id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off" rows="1"
+                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono resize-none overflow-hidden"></textarea>
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">
                     SEND
                 </button>
@@ -343,6 +318,7 @@ HTML_TEMPLATE = """
         const input = document.getElementById('msg-input');
         const statusMsg = document.getElementById('status-msg');
         const nodeCount = document.getElementById('node-count');
+        const activeUsers = document.getElementById('active-users');
         const currentUser = "{{ session['username'] }}";
 
         // Scroll to bottom helper
@@ -359,9 +335,13 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 const messages = data.messages;
                 
-                // Update active node count
+                // Update active node count and users list
                 if (data.active_count !== undefined && nodeCount) {
                     nodeCount.textContent = data.active_count;
+                }
+                if (data.active_users !== undefined && activeUsers) {
+                    const userList = data.active_users.map(user => user === currentUser ? 'YOU' : user).join(', ');
+                    activeUsers.textContent = userList || 'NONE';
                 }
                 
                 const currentContent = messages.map(msg => msg.id).join(',');
@@ -375,7 +355,7 @@ HTML_TEMPLATE = """
 
                     container.innerHTML = messages.map(msg => {
                         const isMe = msg.username === currentUser;
-                        const time = new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        const time = new Date(msg.timestamp + "Z").toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
                         
                         return `
                             <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble" data-message-id="${msg.id}" data-username="${msg.username}">
@@ -395,30 +375,6 @@ HTML_TEMPLATE = """
                 console.error("Connection lost...", e);
             }
         }
-
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const content = input.value;
-            if (!content) return;
-            
-            input.value = ''; 
-            statusMsg.textContent = "Data purge in 60m.";
-            statusMsg.classList.remove('text-red-500');
-            
-            const res = await fetch('/api/messages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: content })
-            });
-            
-            if (res.status === 429) {
-                statusMsg.textContent = "SLOW DOWN // TRANSMISSION RATE EXCEEDED";
-                statusMsg.classList.add('text-red-500', 'shake');
-                setTimeout(() => statusMsg.classList.remove('shake'), 500);
-            }
-            
-            fetchMessages(); 
-        });
 
         // Delete message function
         async function deleteMessage(messageId) {
@@ -490,6 +446,55 @@ HTML_TEMPLATE = """
                     document.removeEventListener('click', removeMenu);
                 });
             }, 100);
+        });
+
+        // Auto-resize textarea
+        function autoResize() {
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 120) + 'px'; // Max height of 120px
+        }
+
+        // Handle keyboard events for message input
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                    // Shift+Enter: Allow new line
+                    setTimeout(autoResize, 0);
+                    return true;
+                } else {
+                    // Enter: Send message
+                    e.preventDefault();
+                    form.dispatchEvent(new Event('submit'));
+                }
+            }
+        });
+
+        // Auto-resize on input
+        input.addEventListener('input', autoResize);
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const content = input.value;
+            if (!content) return;
+            
+            input.value = ''; 
+            input.style.height = 'auto';
+            statusMsg.textContent = "Data purge in 60m.";
+            statusMsg.classList.remove('text-red-500');
+            
+            const res = await fetch('/api/messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: content })
+            });
+            
+            if (res.status === 429) {
+                statusMsg.textContent = "SLOW DOWN // TRANSMISSION RATE EXCEEDED";
+                statusMsg.classList.add('text-red-500', 'shake');
+                setTimeout(() => statusMsg.classList.remove('shake'), 500);
+            }
+            
+            fetchMessages(); 
         });
 
         setInterval(fetchMessages, 2000);
@@ -604,7 +609,6 @@ def leave_room():
 
 @app.route('/api/messages', methods=['GET', 'POST', 'DELETE'])
 def api_messages():
-    ensure_db_initialized()
     cleanup_old_messages()
     
     # Validate session ownership
@@ -663,7 +667,7 @@ def api_messages():
         if content:
             conn = get_db_connection()
             conn.execute('INSERT INTO messages (username, content, room_code, timestamp) VALUES (?, ?, ?, ?)',
-                         (username, content, room_code, datetime.now(timezone.utc)))
+                         (username, content, room_code, datetime.utcnow()))
             conn.commit()
             conn.close()
             return jsonify({"status": "sent"})
@@ -678,12 +682,14 @@ def api_messages():
     
     messages_list = [dict(ix) for ix in messages]
     
-    # Return active count
+    # Return active count and list
     active_count = get_active_count(room_id)
+    active_users = get_active_users(room_id)
     
     return jsonify({
         "messages": messages_list,
-        "active_count": active_count
+        "active_count": active_count,
+        "active_users": active_users
     })
 
 if __name__ == '__main__':

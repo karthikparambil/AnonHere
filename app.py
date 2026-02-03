@@ -689,4 +689,4 @@ def api_messages():
 if __name__ == '__main__':
     # Force init_db to apply new schema for this session
     init_db()
-    app.run(debug=True, port=5000)
+    app.run(debug=False, port=5000)

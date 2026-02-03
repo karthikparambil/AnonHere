@@ -3,14 +3,13 @@ import sqlite3
 import json
 import time
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify
 
 # Configuration
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-# Use /tmp directory for serverless environment
-DB_FILE = '/tmp/anonchat.db'
+DB_FILE = 'anonchat.db'
 
 # --- Security / Rate Limiting ---
 # Simple in-memory rate limiter. 
@@ -18,33 +17,6 @@ RATE_LIMITS = {}
 # Active User Tracking: { 'room_id': { 'username': timestamp } }
 # room_id is 'global' or the code (str)
 LAST_SEEN = {}
-# Active Sessions: { 'username': 'session_id' }
-ACTIVE_SESSIONS = {}
-
-def generate_session_id():
-    """Generate a unique session ID."""
-    return os.urandom(16).hex()
-
-def is_username_active(username):
-    """Check if username is already active in another session."""
-    if username not in ACTIVE_SESSIONS:
-        return False
-    
-    # Check if the session is still valid (exists in current session)
-    session_id = ACTIVE_SESSIONS[username]
-    return session_id != session.get('session_id')
-
-def register_session(username):
-    """Register a new session for the username."""
-    session_id = generate_session_id()
-    ACTIVE_SESSIONS[username] = session_id
-    session['session_id'] = session_id
-    session['username'] = username
-
-def unregister_session(username):
-    """Unregister a session for the username."""
-    if username in ACTIVE_SESSIONS:
-        del ACTIVE_SESSIONS[username]
 
 def check_rate_limit(ident, action, limit, window):
     """
@@ -94,54 +66,34 @@ def get_active_count(room_id):
 def get_db_connection():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
-    
-    # Register datetime adapters for SQLite
-    def adapt_datetime(dt):
-        return dt.isoformat()
-    
-    def convert_datetime(val):
-        return datetime.fromisoformat(val.decode())
-    
-    sqlite3.register_adapter(datetime, adapt_datetime)
-    sqlite3.register_converter("DATETIME", convert_datetime)
-    
     return conn
 
 def init_db():
     """Initialize the database with messages and rooms tables."""
-    try:
-        conn = get_db_connection()
-        # For dev simplicity, we drop tables to handle schema changes
-        conn.execute('DROP TABLE IF EXISTS messages')
-        conn.execute('DROP TABLE IF EXISTS rooms')
-        
-        conn.execute('''
-            CREATE TABLE rooms (
-                code INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.execute('''
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                content TEXT NOT NULL,
-                room_code INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Connect with datetime parsing
-        conn = sqlite3.connect(DB_FILE, detect_types=sqlite3.PARSE_DECLTYPES)
-        conn.row_factory = sqlite3.Row
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Database initialization error: {e}")
-        return False
+    conn = get_db_connection()
+    # For dev simplicity, we drop tables to handle schema changes
+    conn.execute('DROP TABLE IF EXISTS messages')
+    conn.execute('DROP TABLE IF EXISTS rooms')
+    
+    conn.execute('''
+        CREATE TABLE rooms (
+            code INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.execute('''
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            content TEXT NOT NULL,
+            room_code INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 def cleanup_old_messages():
     """
@@ -149,7 +101,7 @@ def cleanup_old_messages():
     Also cleans up old rate limit data to prevent memory leak.
     """
     conn = get_db_connection()
-    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
     
     conn.execute("DELETE FROM messages WHERE timestamp < ?", (one_hour_ago,))
     conn.execute("DELETE FROM rooms WHERE created_at < ?", (one_hour_ago,))
@@ -170,17 +122,9 @@ def cleanup_old_messages():
         if empty:
             del RATE_LIMITS[ident]
 
-# Database initialization will be handled on first request
-DB_INITIALIZED = False
-
-def ensure_db_initialized():
-    """Ensure database is initialized."""
-    global DB_INITIALIZED
-    if not DB_INITIALIZED:
-        if init_db():
-            DB_INITIALIZED = True
-        else:
-            print("Failed to initialize database")
+# Initialize DB on start
+if not os.path.exists(DB_FILE):
+    init_db()
 
 # --- Frontend Template (HTML/CSS/JS) ---
 HTML_TEMPLATE = """
@@ -210,16 +154,6 @@ HTML_TEMPLATE = """
     <div class="max-w-md w-full bg-black p-8 rounded-none border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">ANON_HERE</h1>
         <p class="text-gray-400 text-center mb-6 text-xs uppercase tracking-widest">Ephemeral. Encrypted. Void.</p>
-        
-        <!-- Flash Messages -->
-        {% if get_flashed_messages() %}
-        <div class="mb-4 text-center">
-            <div class="text-red-500 text-xs border border-red-500 p-2 uppercase tracking-widest shake">
-                {{ get_flashed_messages()[0] }}
-            </div>
-        </div>
-        {% endif %}
-        
         <form action="/login" method="POST" class="space-y-4">
             <div>
                 <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Identity</label>
@@ -513,25 +447,12 @@ def home():
 @app.route('/login', methods=['POST'])
 def login():
     username = request.form.get('username')
-    
-    if not username:
-        return redirect(url_for('home'))
-    
-    # Check if username is already active in another session
-    if is_username_active(username):
-        from flask import flash
-        flash("IDENTITY ALREADY ACTIVE")
-        return redirect(url_for('home'))
-    
-    # Register the session
-    register_session(username)
+    if username:
+        session['username'] = username
     return redirect(url_for('home'))
 
 @app.route('/logout')
 def logout():
-    username = session.get('username')
-    if username:
-        unregister_session(username)
     session.clear()
     return redirect(url_for('home'))
 
@@ -604,21 +525,16 @@ def leave_room():
 
 @app.route('/api/messages', methods=['GET', 'POST', 'DELETE'])
 def api_messages():
-    ensure_db_initialized()
     cleanup_old_messages()
     
-    # Validate session ownership
-    username = session.get('username')
-    session_id = session.get('session_id')
-    
-    if not username or not session_id or ACTIVE_SESSIONS.get(username) != session_id:
+    if 'username' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     
     room_code = session.get('room_code')
     
     # Track Presence
     room_id = str(room_code) if room_code else 'global'
-    update_presence(room_id, username)
+    update_presence(room_id, session['username'])
     
     if request.method == 'DELETE':
         # Rate Limit: 10 deletes per minute per IP
@@ -641,7 +557,7 @@ def api_messages():
             conn.close()
             return jsonify({"error": "Message not found"}), 404
         
-        if message['username'] != username:
+        if message['username'] != session['username']:
             conn.close()
             return jsonify({"error": "Unauthorized"}), 403
         
@@ -663,7 +579,7 @@ def api_messages():
         if content:
             conn = get_db_connection()
             conn.execute('INSERT INTO messages (username, content, room_code, timestamp) VALUES (?, ?, ?, ?)',
-                         (username, content, room_code, datetime.now(timezone.utc)))
+                         (session['username'], content, room_code, datetime.utcnow()))
             conn.commit()
             conn.close()
             return jsonify({"status": "sent"})

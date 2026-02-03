@@ -382,13 +382,6 @@ HTML_TEMPLATE = """
 """
 
 # --- Routes ---
-from flask import Flask, send_from_directory
-
-@app.route('/assets/<path:filename>')
-def assets(filename):
-    return send_from_directory('assets', filename)
-
-
 @app.route('/')
 def home():
     if 'username' in session and 'room_type' in session:

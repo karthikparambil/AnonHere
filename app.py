@@ -17,33 +17,6 @@ RATE_LIMITS = {}
 # Active User Tracking: { 'room_id': { 'username': timestamp } }
 # room_id is 'global' or the code (str)
 LAST_SEEN = {}
-# Active Sessions: { 'username': 'session_id' }
-ACTIVE_SESSIONS = {}
-
-def generate_session_id():
-    """Generate a unique session ID."""
-    return os.urandom(16).hex()
-
-def is_username_active(username):
-    """Check if username is already active in another session."""
-    if username not in ACTIVE_SESSIONS:
-        return False
-    
-    # Check if the session is still valid (exists in current session)
-    session_id = ACTIVE_SESSIONS[username]
-    return session_id != session.get('session_id')
-
-def register_session(username):
-    """Register a new session for the username."""
-    session_id = generate_session_id()
-    ACTIVE_SESSIONS[username] = session_id
-    session['session_id'] = session_id
-    session['username'] = username
-
-def unregister_session(username):
-    """Unregister a session for the username."""
-    if username in ACTIVE_SESSIONS:
-        del ACTIVE_SESSIONS[username]
 
 def check_rate_limit(ident, action, limit, window):
     """
@@ -75,23 +48,19 @@ def update_presence(room_id, username):
         LAST_SEEN[room_id] = {}
     LAST_SEEN[room_id][username] = now
 
-def get_active_users(room_id):
-    """Returns list of active users seen in the last 10 seconds."""
+def get_active_count(room_id):
+    """Returns count of users seen in the last 10 seconds."""
     if room_id not in LAST_SEEN:
-        return []
+        return 0
     
     now = time.time()
-    # Filter and get active users
+    # Filter and count
     active_users = [u for u, t in LAST_SEEN[room_id].items() if now - t < 10]
     
     # Optional: cleanup old
     LAST_SEEN[room_id] = {u: t for u, t in LAST_SEEN[room_id].items() if now - t < 10}
     
-    return active_users
-
-def get_active_count(room_id):
-    """Returns count of users seen in the last 10 seconds."""
-    return len(get_active_users(room_id))
+    return len(active_users)
 
 # --- Database Management ---
 def get_db_connection():
@@ -185,16 +154,6 @@ HTML_TEMPLATE = """
     <div class="max-w-md w-full bg-black p-8 rounded-none border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">ANON_HERE</h1>
         <p class="text-gray-400 text-center mb-6 text-xs uppercase tracking-widest">Ephemeral. Encrypted. Void.</p>
-        
-        <!-- Flash Messages -->
-        {% if get_flashed_messages() %}
-        <div class="mb-4 text-center">
-            <div class="text-red-500 text-xs border border-red-500 p-2 uppercase tracking-widest shake">
-                {{ get_flashed_messages()[0] }}
-            </div>
-        </div>
-        {% endif %}
-        
         <form action="/login" method="POST" class="space-y-4">
             <div>
                 <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Identity</label>
@@ -300,8 +259,8 @@ HTML_TEMPLATE = """
         <!-- Input Area -->
         <div class="bg-black p-4 border-t border-white">
             <form id="chat-form" class="flex space-x-2">
-                <textarea id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off" rows="1"
-                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono resize-none overflow-hidden"></textarea>
+                <input type="text" id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off"
+                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">
                     SEND
                 </button>
@@ -318,7 +277,6 @@ HTML_TEMPLATE = """
         const input = document.getElementById('msg-input');
         const statusMsg = document.getElementById('status-msg');
         const nodeCount = document.getElementById('node-count');
-        const activeUsers = document.getElementById('active-users');
         const currentUser = "{{ session['username'] }}";
 
         // Scroll to bottom helper
@@ -335,13 +293,9 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 const messages = data.messages;
                 
-                // Update active node count and users list
+                // Update active node count
                 if (data.active_count !== undefined && nodeCount) {
                     nodeCount.textContent = data.active_count;
-                }
-                if (data.active_users !== undefined && activeUsers) {
-                    const userList = data.active_users.map(user => user === currentUser ? 'YOU' : user).join(', ');
-                    activeUsers.textContent = userList || 'NONE';
                 }
                 
                 const currentContent = messages.map(msg => msg.id).join(',');
@@ -358,11 +312,11 @@ HTML_TEMPLATE = """
                         const time = new Date(msg.timestamp + "Z").toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
                         
                         return `
-                            <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble" data-message-id="${msg.id}" data-username="${msg.username}">
+                            <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble">
                                 <div class="text-[10px] text-gray-500 mb-1 px-1 font-mono uppercase">
                                     ${isMe ? 'YOU' : msg.username} <span class="text-gray-700">|</span> ${time}
                                 </div>
-                                <div class="${isMe ? 'bg-white text-black border border-white' : 'bg-black text-white border border-white'} max-w-[80%] px-4 py-2 rounded-none shadow-none text-sm break-words font-mono ${isMe ? 'cursor-pointer' : ''}">
+                                <div class="${isMe ? 'bg-white text-black border border-white' : 'bg-black text-white border border-white'} max-w-[80%] px-4 py-2 rounded-none shadow-none text-sm break-words font-mono">
                                     ${msg.content}
                                 </div>
                             </div>
@@ -376,109 +330,12 @@ HTML_TEMPLATE = """
             }
         }
 
-        // Delete message function
-        async function deleteMessage(messageId) {
-            try {
-                const res = await fetch('/api/messages', {
-                    method: 'DELETE',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message_id: messageId })
-                });
-                
-                if (res.status === 429) {
-                    statusMsg.textContent = "SLOW DOWN // DELETION RATE EXCEEDED";
-                    statusMsg.classList.add('text-red-500', 'shake');
-                    setTimeout(() => statusMsg.classList.remove('shake'), 500);
-                } else if (res.ok) {
-                    statusMsg.textContent = "Message purged.";
-                    statusMsg.classList.remove('text-red-500');
-                    fetchMessages(); // Refresh messages
-                } else {
-                    const data = await res.json();
-                    statusMsg.textContent = data.error || "Failed to delete message";
-                    statusMsg.classList.add('text-red-500');
-                }
-            } catch (e) {
-                console.error("Delete failed:", e);
-                statusMsg.textContent = "Connection lost...";
-                statusMsg.classList.add('text-red-500');
-            }
-        }
-
-        // Right-click context menu for deletion
-        container.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            
-            const messageBubble = e.target.closest('.msg-bubble');
-            if (!messageBubble) return;
-            
-            const messageId = messageBubble.dataset.messageId;
-            const messageUsername = messageBubble.dataset.username;
-            
-            // Only allow deletion of own messages
-            if (messageUsername !== currentUser) return;
-            
-            // Create custom context menu
-            const existingMenu = document.getElementById('context-menu');
-            if (existingMenu) existingMenu.remove();
-            
-            const menu = document.createElement('div');
-            menu.id = 'context-menu';
-            menu.className = 'fixed bg-black border border-white text-white text-xs uppercase tracking-wider py-1 z-50';
-            menu.style.left = e.pageX + 'px';
-            menu.style.top = e.pageY + 'px';
-            
-            const deleteItem = document.createElement('div');
-            deleteItem.className = 'px-4 py-2 hover:bg-red-600 hover:text-black cursor-pointer transition';
-            deleteItem.textContent = '[PURGE MESSAGE]';
-            deleteItem.onclick = () => {
-                deleteMessage(parseInt(messageId));
-                menu.remove();
-            };
-            
-            menu.appendChild(deleteItem);
-            document.body.appendChild(menu);
-            
-            // Remove menu when clicking elsewhere
-            setTimeout(() => {
-                document.addEventListener('click', function removeMenu() {
-                    menu.remove();
-                    document.removeEventListener('click', removeMenu);
-                });
-            }, 100);
-        });
-
-        // Auto-resize textarea
-        function autoResize() {
-            input.style.height = 'auto';
-            input.style.height = Math.min(input.scrollHeight, 120) + 'px'; // Max height of 120px
-        }
-
-        // Handle keyboard events for message input
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                if (e.shiftKey) {
-                    // Shift+Enter: Allow new line
-                    setTimeout(autoResize, 0);
-                    return true;
-                } else {
-                    // Enter: Send message
-                    e.preventDefault();
-                    form.dispatchEvent(new Event('submit'));
-                }
-            }
-        });
-
-        // Auto-resize on input
-        input.addEventListener('input', autoResize);
-
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const content = input.value;
             if (!content) return;
             
             input.value = ''; 
-            input.style.height = 'auto';
             statusMsg.textContent = "Data purge in 60m.";
             statusMsg.classList.remove('text-red-500');
             
@@ -518,25 +375,12 @@ def home():
 @app.route('/login', methods=['POST'])
 def login():
     username = request.form.get('username')
-    
-    if not username:
-        return redirect(url_for('home'))
-    
-    # Check if username is already active in another session
-    if is_username_active(username):
-        from flask import flash
-        flash("IDENTITY ALREADY ACTIVE")
-        return redirect(url_for('home'))
-    
-    # Register the session
-    register_session(username)
+    if username:
+        session['username'] = username
     return redirect(url_for('home'))
 
 @app.route('/logout')
 def logout():
-    username = session.get('username')
-    if username:
-        unregister_session(username)
     session.clear()
     return redirect(url_for('home'))
 
@@ -607,52 +451,18 @@ def leave_room():
     session.pop('room_name', None)
     return redirect(url_for('home'))
 
-@app.route('/api/messages', methods=['GET', 'POST', 'DELETE'])
+@app.route('/api/messages', methods=['GET', 'POST'])
 def api_messages():
     cleanup_old_messages()
     
-    # Validate session ownership
-    username = session.get('username')
-    session_id = session.get('session_id')
-    
-    if not username or not session_id or ACTIVE_SESSIONS.get(username) != session_id:
+    if 'username' not in session:
         return jsonify({"error": "Unauthorized"}), 401
     
     room_code = session.get('room_code')
     
     # Track Presence
     room_id = str(room_code) if room_code else 'global'
-    update_presence(room_id, username)
-    
-    if request.method == 'DELETE':
-        # Rate Limit: 10 deletes per minute per IP
-        ip = request.remote_addr
-        
-        if not check_rate_limit(ip, 'delete_msg', 10, 60):
-            return jsonify({"error": "Rate limit exceeded"}), 429
-
-        data = request.get_json()
-        message_id = data.get('message_id')
-        
-        if not message_id:
-            return jsonify({"error": "Message ID required"}), 400
-        
-        conn = get_db_connection()
-        # Only allow users to delete their own messages
-        message = conn.execute('SELECT username FROM messages WHERE id = ?', (message_id,)).fetchone()
-        
-        if not message:
-            conn.close()
-            return jsonify({"error": "Message not found"}), 404
-        
-        if message['username'] != username:
-            conn.close()
-            return jsonify({"error": "Unauthorized"}), 403
-        
-        conn.execute('DELETE FROM messages WHERE id = ?', (message_id,))
-        conn.commit()
-        conn.close()
-        return jsonify({"status": "deleted"})
+    update_presence(room_id, session['username'])
     
     if request.method == 'POST':
         # Rage Limit: 5 messages per 10 seconds.
@@ -667,7 +477,7 @@ def api_messages():
         if content:
             conn = get_db_connection()
             conn.execute('INSERT INTO messages (username, content, room_code, timestamp) VALUES (?, ?, ?, ?)',
-                         (username, content, room_code, datetime.utcnow()))
+                         (session['username'], content, room_code, datetime.utcnow()))
             conn.commit()
             conn.close()
             return jsonify({"status": "sent"})
@@ -682,17 +492,15 @@ def api_messages():
     
     messages_list = [dict(ix) for ix in messages]
     
-    # Return active count and list
+    # Return active count
     active_count = get_active_count(room_id)
-    active_users = get_active_users(room_id)
     
     return jsonify({
         "messages": messages_list,
-        "active_count": active_count,
-        "active_users": active_users
+        "active_count": active_count
     })
 
 if __name__ == '__main__':
     # Force init_db to apply new schema for this session
     init_db()
-    app.run(debug=False, port=5000)
+    app.run(debug=True, port=5000)

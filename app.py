@@ -3,8 +3,8 @@ import sqlite3
 import json
 import time
 import random
-from datetime import datetime, timedelta
-from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify
+from datetime import datetime, timedelta, timezone
+from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify, flash
 
 # Try importing psycopg2 for Vercel Postgres; pass if not found (local use)
 try:
@@ -15,15 +15,11 @@ except ImportError:
 
 # Configuration
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24)) # Secure key for prod
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 DB_FILE = 'anonchat.db'
 
-# --- Security / Rate Limiting ---
-# Note: On Vercel (Serverless), these in-memory dictionaries may reset 
-# or not be shared across different users if traffic is high. 
-# For a production app, use Vercel KV (Redis). For now, this works for simple usage.
+# --- Security / Rate Limiting (In-Memory) ---
 RATE_LIMITS = {}
-LAST_SEEN = {}
 
 def check_rate_limit(ident, action, limit, window):
     """Returns True if allowed, False if limit exceeded."""
@@ -38,21 +34,6 @@ def check_rate_limit(ident, action, limit, window):
     RATE_LIMITS[ident][action].append(now)
     return True
 
-def update_presence(room_id, username):
-    """Updates the last seen timestamp for a user."""
-    now = time.time()
-    if room_id not in LAST_SEEN: LAST_SEEN[room_id] = {}
-    LAST_SEEN[room_id][username] = now
-
-def get_active_count(room_id):
-    """Returns count of users seen in the last 10 seconds."""
-    if room_id not in LAST_SEEN: return 0
-    now = time.time()
-    active_users = [u for u, t in LAST_SEEN[room_id].items() if now - t < 10]
-    # Optional cleanup
-    LAST_SEEN[room_id] = {u: t for u, t in LAST_SEEN[room_id].items() if now - t < 10}
-    return len(active_users)
-
 # --- Database Wrapper (SQLite + Postgres) ---
 def get_db_connection():
     if os.environ.get('POSTGRES_URL'):
@@ -65,13 +46,12 @@ def get_db_connection():
         return conn, 'sqlite'
 
 def execute_query(query, args=(), fetch_one=False, fetch_all=False):
-    """Helper to handle ? (SQLite) vs %s (Postgres) and cursor differences."""
     conn, db_type = get_db_connection()
     result = None
     try:
         if db_type == 'postgres':
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            query = query.replace('?', '%s') # Convert syntax
+            query = query.replace('?', '%s')
         else:
             cur = conn.cursor()
 
@@ -85,22 +65,22 @@ def execute_query(query, args=(), fetch_one=False, fetch_all=False):
             result = [dict(row) for row in res]
         else:
             conn.commit()
-            
+    except Exception as e:
+        print(f"Database Error: {e}")
+        if not fetch_one and not fetch_all:
+            conn.rollback()
     finally:
         conn.close()
     return result
 
 def init_db():
-    """Initialize DB with support for both SQLite and Postgres syntax."""
     conn, db_type = get_db_connection()
     try:
         cur = conn.cursor()
-        
-        # Determine syntax types
         pk_type = "SERIAL PRIMARY KEY" if db_type == 'postgres' else "INTEGER PRIMARY KEY AUTOINCREMENT"
         ts_type = "TIMESTAMP" if db_type == 'postgres' else "DATETIME"
         
-        # Create Rooms
+        # Table: Rooms
         cur.execute(f'''
             CREATE TABLE IF NOT EXISTS rooms (
                 code INTEGER PRIMARY KEY,
@@ -109,7 +89,7 @@ def init_db():
             )
         ''')
         
-        # Create Messages
+        # Table: Messages
         cur.execute(f'''
             CREATE TABLE IF NOT EXISTS messages (
                 id {pk_type},
@@ -119,19 +99,60 @@ def init_db():
                 timestamp {ts_type} DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Table: Active Users (For unique usernames)
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS active_users (
+                username TEXT PRIMARY KEY,
+                last_seen {ts_type} DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         conn.commit()
     except Exception as e:
         print(f"DB Init Error: {e}")
     finally:
         conn.close()
 
-def cleanup_old_messages():
-    """Deletes data older than 1 hour."""
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+def cleanup_data():
+    """
+    1. Delete messages older than 1 hour.
+    2. Delete inactive users (inactive > 2 mins) to free up usernames.
+    """
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    two_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
+    
     execute_query("DELETE FROM messages WHERE timestamp < ?", (one_hour_ago,))
     execute_query("DELETE FROM rooms WHERE created_at < ?", (one_hour_ago,))
+    execute_query("DELETE FROM active_users WHERE last_seen < ?", (two_mins_ago,))
 
-# Initialize DB on load (safe to run multiple times due to IF NOT EXISTS)
+def update_user_presence(username):
+    """Updates last_seen for a user. If not exists (shouldn't happen if logged in), re-inserts."""
+    now = datetime.now(timezone.utc)
+    # Try update first
+    conn, db_type = get_db_connection()
+    try:
+        if db_type == 'postgres':
+            cur = conn.cursor()
+            cur.execute("UPDATE active_users SET last_seen = %s WHERE username = %s", (now, username))
+            if cur.rowcount == 0:
+                cur.execute("INSERT INTO active_users (username, last_seen) VALUES (%s, %s) ON CONFLICT (username) DO UPDATE SET last_seen = %s", (username, now, now))
+        else:
+            cur = conn.cursor()
+            cur.execute("UPDATE active_users SET last_seen = ? WHERE username = ?", (now, username))
+            if cur.rowcount == 0:
+                cur.execute("INSERT OR REPLACE INTO active_users (username, last_seen) VALUES (?, ?)", (username, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_active_user_count():
+    """Count users active in last 30 seconds."""
+    thirty_sec_ago = datetime.now(timezone.utc) - timedelta(seconds=30)
+    res = execute_query("SELECT COUNT(*) as count FROM active_users WHERE last_seen > ?", (thirty_sec_ago,), fetch_one=True)
+    return res['count'] if res else 0
+
+# Initialize DB on load
 init_db()
 
 # --- Frontend Template ---
@@ -162,6 +183,15 @@ HTML_TEMPLATE = """
     <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">ANON_HERE</h1>
         <p class="text-gray-400 text-center mb-6 text-xs uppercase tracking-widest">Ephemeral. Encrypted. Void.</p>
+        
+        {% if get_flashed_messages() %}
+        <div class="mb-4 text-center">
+            <div class="text-red-500 text-xs border border-red-500 p-2 uppercase tracking-widest shake">
+                {{ get_flashed_messages()[0] }}
+            </div>
+        </div>
+        {% endif %}
+
         <form action="/login" method="POST" class="space-y-4">
             <div>
                 <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Identity</label>
@@ -238,7 +268,7 @@ HTML_TEMPLATE = """
                     {% if session.get('room_code') %}
                     <span class="text-[10px] text-gray-500 uppercase tracking-widest">FREQ CODE: <span class="text-white border border-gray-700 px-1">{{ session['room_code'] }}</span></span>
                     {% endif %}
-                    <span class="text-[10px] text-gray-500 uppercase tracking-widest">NODES: <span id="node-count" class="text-white">1</span></span>
+                    <span class="text-[10px] text-gray-500 uppercase tracking-widest">ACTIVE NODES: <span id="node-count" class="text-white">1</span></span>
                 </div>
             </div>
             <div class="flex items-center space-x-4">
@@ -257,7 +287,7 @@ HTML_TEMPLATE = """
                     class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">SEND</button>
             </form>
-            <div id="status-msg" class="text-[10px] text-gray-600 mt-2 text-center uppercase tracking-widest">Data purge in 60m.</div>
+            <div id="status-msg" class="text-[10px] text-gray-600 mt-2 text-center uppercase tracking-widest">Each message vanishes 1h after sending.</div>
         </div>
     </div>
 
@@ -270,6 +300,14 @@ HTML_TEMPLATE = """
         const currentUser = "{{ session['username'] }}";
 
         function scrollToBottom() { container.scrollTop = container.scrollHeight; }
+
+        async function deleteMessage(id) {
+            if(!confirm("DELETE TRANSMISSION PERMANENTLY?")) return;
+            try {
+                const res = await fetch(`/api/messages/${id}`, { method: 'DELETE' });
+                if(res.ok) fetchMessages();
+            } catch(e) { console.error(e); }
+        }
 
         async function fetchMessages() {
             try {
@@ -289,11 +327,19 @@ HTML_TEMPLATE = """
                     }
                     container.innerHTML = messages.map(msg => {
                         const isMe = msg.username === currentUser;
-                        const time = new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        // Handle time: append Z if missing to assume UTC
+                        let ts = msg.timestamp;
+                        if (!ts.endsWith('Z') && !ts.includes('+')) ts += 'Z';
+                        
+                        const dateObj = new Date(ts);
+                        const timeStr = dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        
+                        const deleteBtn = isMe ? `<button onclick="deleteMessage(${msg.id})" class="ml-2 text-red-500 hover:text-red-300 text-[10px] border border-red-900 px-1 hover:border-red-500 transition uppercase">[DEL]</button>` : '';
+
                         return `
-                            <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble">
-                                <div class="text-[10px] text-gray-500 mb-1 px-1 font-mono uppercase">
-                                    ${isMe ? 'YOU' : msg.username} <span class="text-gray-700">|</span> ${time}
+                            <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble group">
+                                <div class="text-[10px] text-gray-500 mb-1 px-1 font-mono uppercase flex items-center">
+                                    ${isMe ? 'YOU' : msg.username} <span class="text-gray-700 mx-1">|</span> ${timeStr} ${deleteBtn}
                                 </div>
                                 <div class="${isMe ? 'bg-white text-black border border-white' : 'bg-black text-white border border-white'} max-w-[80%] px-4 py-2 rounded-none shadow-none text-sm break-words font-mono">
                                     ${msg.content}
@@ -311,7 +357,7 @@ HTML_TEMPLATE = """
             const content = input.value;
             if (!content) return;
             input.value = ''; 
-            statusMsg.textContent = "Data purge in 60m.";
+            statusMsg.textContent = "Each message vanishes 1h after sending.";
             statusMsg.classList.remove('text-red-500');
             
             const res = await fetch('/api/messages', {
@@ -346,12 +392,28 @@ def home():
 
 @app.route('/login', methods=['POST'])
 def login():
-    if request.form.get('username'):
-        session['username'] = request.form.get('username')
+    cleanup_data() # Opportunistic cleanup
+    username = request.form.get('username')
+    if not username: return redirect(url_for('home'))
+
+    # Check for unique username (if active in last 2 minutes)
+    two_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
+    exists = execute_query("SELECT 1 FROM active_users WHERE username = ? AND last_seen > ?", (username, two_mins_ago), fetch_one=True)
+    
+    if exists:
+        flash("IDENTITY ALREADY ACTIVE. CHOOSE ANOTHER.")
+        return redirect(url_for('home'))
+
+    # Upsert new user
+    update_user_presence(username)
+    session['username'] = username
     return redirect(url_for('home'))
 
 @app.route('/logout')
 def logout():
+    # Remove from active users explicitly
+    if 'username' in session:
+        execute_query("DELETE FROM active_users WHERE username = ?", (session['username'],))
     session.clear()
     return redirect(url_for('home'))
 
@@ -369,7 +431,6 @@ def create_room():
         
     while True:
         code = random.randint(100000, 999999)
-        # Check collision using wrapper
         exists = execute_query('SELECT 1 FROM rooms WHERE code = ?', (code,), fetch_one=True)
         if not exists:
             execute_query('INSERT INTO rooms (code, name) VALUES (?, ?)', (code, room_name))
@@ -386,7 +447,6 @@ def join_room():
     if not code: return redirect(url_for('home'))
     
     if not check_rate_limit(request.remote_addr, 'join_fail', 5, 60):
-        from flask import flash
         flash("SECURITY LOCKOUT // TOO MANY FAILED ATTEMPTS")
         return redirect(url_for('home'))
     
@@ -397,7 +457,6 @@ def join_room():
         session['room_code'] = room['code']
         session['room_name'] = room['name']
     else:
-        from flask import flash
         flash("INVALID FREQUENCY CODE")
     
     return redirect(url_for('home'))
@@ -409,14 +468,21 @@ def leave_room():
     session.pop('room_name', None)
     return redirect(url_for('home'))
 
+@app.route('/api/messages/<int:msg_id>', methods=['DELETE'])
+def delete_message(msg_id):
+    if 'username' not in session: return jsonify({"error": "Unauthorized"}), 401
+    
+    # Only allow deleting own messages
+    execute_query("DELETE FROM messages WHERE id = ? AND username = ?", (msg_id, session['username']))
+    return jsonify({"status": "deleted"})
+
 @app.route('/api/messages', methods=['GET', 'POST'])
 def api_messages():
-    cleanup_old_messages()
+    cleanup_data()
     if 'username' not in session: return jsonify({"error": "Unauthorized"}), 401
     
     room_code = session.get('room_code')
-    room_id = str(room_code) if room_code else 'global'
-    update_presence(room_id, session['username'])
+    update_user_presence(session['username'])
     
     if request.method == 'POST':
         if not check_rate_limit(request.remote_addr, 'send_msg', 5, 10):
@@ -426,7 +492,7 @@ def api_messages():
         if content:
             execute_query(
                 'INSERT INTO messages (username, content, room_code, timestamp) VALUES (?, ?, ?, ?)',
-                (session['username'], content, room_code, datetime.utcnow())
+                (session['username'], content, room_code, datetime.now(timezone.utc))
             )
             return jsonify({"status": "sent"})
 
@@ -436,10 +502,15 @@ def api_messages():
     else:
         messages = execute_query('SELECT * FROM messages WHERE room_code IS NULL ORDER BY timestamp ASC', fetch_all=True)
     
+    # Convert datetime objects to string for JSON serialization
+    for msg in messages:
+        if isinstance(msg['timestamp'], datetime):
+            msg['timestamp'] = msg['timestamp'].isoformat()
+
     return jsonify({
         "messages": messages,
-        "active_count": get_active_count(room_id)
+        "active_count": get_active_user_count()
     })
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=False, port=5000)

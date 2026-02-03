@@ -382,6 +382,9 @@ HTML_TEMPLATE = """
 """
 
 # --- Routes ---
+@app.route('/assets/<path:filename>')
+def assets(filename):
+    return send_from_directory('assets', filename)
 
 @app.route('/')
 def home():

@@ -75,23 +75,19 @@ def update_presence(room_id, username):
         LAST_SEEN[room_id] = {}
     LAST_SEEN[room_id][username] = now
 
-def get_active_users(room_id):
-    """Returns list of active users seen in the last 10 seconds."""
+def get_active_count(room_id):
+    """Returns count of users seen in the last 10 seconds."""
     if room_id not in LAST_SEEN:
-        return []
+        return 0
     
     now = time.time()
-    # Filter and get active users
+    # Filter and count
     active_users = [u for u, t in LAST_SEEN[room_id].items() if now - t < 10]
     
     # Optional: cleanup old
     LAST_SEEN[room_id] = {u: t for u, t in LAST_SEEN[room_id].items() if now - t < 10}
     
-    return active_users
-
-def get_active_count(room_id):
-    """Returns count of users seen in the last 10 seconds."""
-    return len(get_active_users(room_id))
+    return len(active_users)
 
 # --- Database Management ---
 def get_db_connection():
@@ -300,8 +296,8 @@ HTML_TEMPLATE = """
         <!-- Input Area -->
         <div class="bg-black p-4 border-t border-white">
             <form id="chat-form" class="flex space-x-2">
-                <textarea id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off" rows="1"
-                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono resize-none overflow-hidden"></textarea>
+                <input type="text" id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off"
+                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">
                     SEND
                 </button>
@@ -318,7 +314,6 @@ HTML_TEMPLATE = """
         const input = document.getElementById('msg-input');
         const statusMsg = document.getElementById('status-msg');
         const nodeCount = document.getElementById('node-count');
-        const activeUsers = document.getElementById('active-users');
         const currentUser = "{{ session['username'] }}";
 
         // Scroll to bottom helper
@@ -335,13 +330,9 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 const messages = data.messages;
                 
-                // Update active node count and users list
+                // Update active node count
                 if (data.active_count !== undefined && nodeCount) {
                     nodeCount.textContent = data.active_count;
-                }
-                if (data.active_users !== undefined && activeUsers) {
-                    const userList = data.active_users.map(user => user === currentUser ? 'YOU' : user).join(', ');
-                    activeUsers.textContent = userList || 'NONE';
                 }
                 
                 const currentContent = messages.map(msg => msg.id).join(',');
@@ -375,6 +366,30 @@ HTML_TEMPLATE = """
                 console.error("Connection lost...", e);
             }
         }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const content = input.value;
+            if (!content) return;
+            
+            input.value = ''; 
+            statusMsg.textContent = "Data purge in 60m.";
+            statusMsg.classList.remove('text-red-500');
+            
+            const res = await fetch('/api/messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: content })
+            });
+            
+            if (res.status === 429) {
+                statusMsg.textContent = "SLOW DOWN // TRANSMISSION RATE EXCEEDED";
+                statusMsg.classList.add('text-red-500', 'shake');
+                setTimeout(() => statusMsg.classList.remove('shake'), 500);
+            }
+            
+            fetchMessages(); 
+        });
 
         // Delete message function
         async function deleteMessage(messageId) {
@@ -446,55 +461,6 @@ HTML_TEMPLATE = """
                     document.removeEventListener('click', removeMenu);
                 });
             }, 100);
-        });
-
-        // Auto-resize textarea
-        function autoResize() {
-            input.style.height = 'auto';
-            input.style.height = Math.min(input.scrollHeight, 120) + 'px'; // Max height of 120px
-        }
-
-        // Handle keyboard events for message input
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                if (e.shiftKey) {
-                    // Shift+Enter: Allow new line
-                    setTimeout(autoResize, 0);
-                    return true;
-                } else {
-                    // Enter: Send message
-                    e.preventDefault();
-                    form.dispatchEvent(new Event('submit'));
-                }
-            }
-        });
-
-        // Auto-resize on input
-        input.addEventListener('input', autoResize);
-
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const content = input.value;
-            if (!content) return;
-            
-            input.value = ''; 
-            input.style.height = 'auto';
-            statusMsg.textContent = "Data purge in 60m.";
-            statusMsg.classList.remove('text-red-500');
-            
-            const res = await fetch('/api/messages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: content })
-            });
-            
-            if (res.status === 429) {
-                statusMsg.textContent = "SLOW DOWN // TRANSMISSION RATE EXCEEDED";
-                statusMsg.classList.add('text-red-500', 'shake');
-                setTimeout(() => statusMsg.classList.remove('shake'), 500);
-            }
-            
-            fetchMessages(); 
         });
 
         setInterval(fetchMessages, 2000);
@@ -682,17 +648,15 @@ def api_messages():
     
     messages_list = [dict(ix) for ix in messages]
     
-    # Return active count and list
+    # Return active count
     active_count = get_active_count(room_id)
-    active_users = get_active_users(room_id)
     
     return jsonify({
         "messages": messages_list,
-        "active_count": active_count,
-        "active_users": active_users
+        "active_count": active_count
     })
 
 if __name__ == '__main__':
     # Force init_db to apply new schema for this session
     init_db()
-    app.run(debug=False, port=5000)
+    app.run(debug=True, port=5000)

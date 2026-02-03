@@ -163,7 +163,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AnonHere</title>
-    <link rel="icon" type="image/png" href="/assets/favicon.png">
+    <link rel="icon" href="/assets/favicon.ico">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #000000; color: #ffffff; font-family: 'Courier New', monospace; }
@@ -382,9 +382,14 @@ HTML_TEMPLATE = """
 """
 
 # --- Routes ---
+from flask import Flask, send_from_directory
+
+app = Flask(__name__)
+
 @app.route('/assets/<path:filename>')
 def assets(filename):
     return send_from_directory('assets', filename)
+
 
 @app.route('/')
 def home():

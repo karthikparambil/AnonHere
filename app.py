@@ -163,7 +163,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AnonHere</title>
-    <link rel="icon" href="/assets/favicon.ico">
+    <link rel="icon" href="https://raw.githubusercontent.com/karthikparambil/AnonHere/refs/heads/main/assets/favicon.ico">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #000000; color: #ffffff; font-family: 'Courier New', monospace; }

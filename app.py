@@ -205,7 +205,7 @@ HTML_TEMPLATE = """
         </form>
     </div>
 
-    <!-- Lobby View -->
+    <!-- Created By github.com/karthikparambil -->
     {% elif not session.get('room_type') %}
     <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-xl font-bold text-center mb-2 text-white tracking-widest uppercase">AnonHere</h1>

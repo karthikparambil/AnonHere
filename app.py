@@ -179,7 +179,6 @@ HTML_TEMPLATE = """
 </head>
 <body class="h-screen flex flex-col items-center justify-center {{ 'p-4' if not session.get('username') or not session.get('room_type') else '' }}">
 
-    <!-- Login View -->
     {% if not session.get('username') %}
     <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">ANON_HERE</h1>
@@ -254,7 +253,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
     
-    <!-- Chat View -->
     {% else %}
     <div class="w-full h-full flex flex-col bg-black overflow-hidden border-x border-white/10">
         <div class="bg-black p-4 border-b border-white flex justify-between items-center">

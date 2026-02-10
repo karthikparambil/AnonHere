@@ -4,8 +4,7 @@ import json
 import time
 import random
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify, flash, send_from_directory
-from werkzeug.utils import secure_filename
+from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify, flash
 
 # Try importing psycopg2 for Vercel Postgres; pass if not found (local use)
 try:
@@ -18,18 +17,6 @@ except ImportError:
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 DB_FILE = 'anonchat.db'
-UPLOAD_FOLDER = 'static/uploads'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB limit
-
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
-
-ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
-
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # --- Security / Rate Limiting (In-Memory) ---
 RATE_LIMITS = {}
@@ -121,17 +108,6 @@ def init_db():
             )
         ''')
         
-        # Table: Messages - Ensure attachment columns exist
-        # Check if columns exist by selecting from sqlite_master equivalent or just try adding them
-        # SQLite doesn't support IF NOT EXISTS for columns easily, so we just try and catch error or check pragma
-        # Actually simplest for this script: Just try adding them and ignore error if they exist.
-        try:
-            cur.execute("ALTER TABLE messages ADD COLUMN attachment_url TEXT")
-        except: pass
-        try:
-            cur.execute("ALTER TABLE messages ADD COLUMN attachment_type TEXT")
-        except: pass
-        
         conn.commit()
     except Exception as e:
         print(f"DB Init Error: {e}")
@@ -146,14 +122,6 @@ def cleanup_data():
     one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     two_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
     
-    # Delete associated files for old messages
-    old_msgs = execute_query("SELECT attachment_url FROM messages WHERE timestamp < ? AND attachment_url IS NOT NULL", (one_hour_ago,), fetch_all=True)
-    if old_msgs:
-        for msg in old_msgs:
-            fpath = os.path.join(app.config['UPLOAD_FOLDER'], msg['attachment_url'])
-            if os.path.exists(fpath):
-                os.remove(fpath)
-
     execute_query("DELETE FROM messages WHERE timestamp < ?", (one_hour_ago,))
     execute_query("DELETE FROM rooms WHERE created_at < ?", (one_hour_ago,))
     execute_query("DELETE FROM active_users WHERE last_seen < ?", (two_mins_ago,))
@@ -314,15 +282,8 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="bg-black p-4 border-t border-white">
-            <div id="file-preview" class="text-[10px] text-gray-500 mb-2 hidden uppercase tracking-widest pl-2"></div>
-            <form id="chat-form" class="flex space-x-2 items-center">
-                <label for="file-upload" class="cursor-pointer text-gray-400 hover:text-white p-2 border border-transparent hover:border-gray-800 transition">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
-                    </svg>
-                </label>
-                <input id="file-upload" type="file" class="hidden">
-                <input type="text" id="msg-input" placeholder="ENTER MESSAGE..." autocomplete="off"
+            <form id="chat-form" class="flex space-x-2">
+                <input type="text" id="msg-input" placeholder="ENTER MESSAGE..." required autocomplete="off"
                     class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">SEND</button>
             </form>
@@ -334,32 +295,9 @@ HTML_TEMPLATE = """
         const container = document.getElementById('message-container');
         const form = document.getElementById('chat-form');
         const input = document.getElementById('msg-input');
-        const fileInput = document.getElementById('file-upload');
-        const filePreview = document.getElementById('file-preview');
         const statusMsg = document.getElementById('status-msg');
         const nodeCount = document.getElementById('node-count');
         const currentUser = "{{ session['username'] }}";
-
-        fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) {
-                const file = fileInput.files[0];
-                if (file.size > 5 * 1024 * 1024) {
-                    statusMsg.textContent = "ERROR // FILE EXCEEDS 5MB LIMIT";
-                    statusMsg.classList.add('text-red-500', 'shake');
-                    setTimeout(() => statusMsg.classList.remove('shake'), 500);
-                    fileInput.value = ''; // Clear selection
-                    filePreview.classList.add('hidden');
-                    return;
-                }
-                statusMsg.textContent = "Each message vanishes 1h after sending.";
-                statusMsg.classList.remove('text-red-500');
-                
-                filePreview.textContent = `[ATTACHMENT: ${file.name}]`;
-                filePreview.classList.remove('hidden');
-            } else {
-                filePreview.classList.add('hidden');
-            }
-        });
 
         function scrollToBottom() { container.scrollTop = container.scrollHeight; }
 
@@ -415,11 +353,6 @@ HTML_TEMPLATE = """
                                 </div>
                                 <div class="${isMe ? 'bg-white text-black border border-white' : 'bg-black text-white border border-white'} max-w-[80%] px-4 py-2 rounded-none shadow-none text-sm break-words font-mono">
                                     ${escapeHtml(msg.content)}
-                                    ${msg.attachment_url ? (
-                                        msg.attachment_type && msg.attachment_type.startsWith('image/') ? 
-                                        `<br><a href="/uploads/${msg.attachment_url}" target="_blank"><img src="/uploads/${msg.attachment_url}" class="mt-2 max-w-full max-h-60 border border-gray-700 hover:border-white transition"></a>` :
-                                        `<br><a href="/uploads/${msg.attachment_url}" target="_blank" class="block mt-2 text-gray-400 hover:text-white text-xs border border-gray-700 p-1 w-fit uppercase">[FILE: ${msg.attachment_url.split('_').slice(2).join('_')}]</a>`
-                                    ) : ''}
                                 </div>
                             </div>
                         `;
@@ -432,26 +365,15 @@ HTML_TEMPLATE = """
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const content = input.value;
-            const file = fileInput.files[0];
-            
-            if (!content && !file) return;
-            
-            input.value = '';
-            fileInput.value = '';
-            filePreview.classList.add('hidden');
-            
-            statusMsg.textContent = "Sending encrypted transmission...";
+            if (!content) return;
+            input.value = ''; 
+            statusMsg.textContent = "Each message vanishes 1h after sending.";
             statusMsg.classList.remove('text-red-500');
             
-            const formData = new FormData();
-            formData.append('content', content);
-            if (file) {
-                formData.append('file', file);
-            }
-
             const res = await fetch('/api/messages', {
                 method: 'POST',
-                body: formData
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: content })
             });
             if (res.status === 429) {
                 statusMsg.textContent = "SLOW DOWN // TRANSMISSION RATE EXCEEDED";
@@ -560,18 +482,9 @@ def leave_room():
 def delete_message(msg_id):
     if 'username' not in session: return jsonify({"error": "Unauthorized"}), 401
     
-    # Check if message exists and belongs to user
-    msg = execute_query("SELECT * FROM messages WHERE id = ? AND username = ?", (msg_id, session['username']), fetch_one=True)
-    if msg:
-        # Delete file if exists
-        if msg.get('attachment_url'):
-            fpath = os.path.join(app.config['UPLOAD_FOLDER'], msg['attachment_url'])
-            if os.path.exists(fpath):
-                os.remove(fpath)
-
-        execute_query("DELETE FROM messages WHERE id = ?", (msg_id,))
-        return jsonify({"status": "deleted"})
-    return jsonify({"error": "Not found"}), 404
+    # Only allow deleting own messages
+    execute_query("DELETE FROM messages WHERE id = ? AND username = ?", (msg_id, session['username']))
+    return jsonify({"status": "deleted"})
 
 @app.route('/api/messages', methods=['GET', 'POST'])
 def api_messages():
@@ -585,24 +498,11 @@ def api_messages():
         if not check_rate_limit(request.remote_addr, 'send_msg', 5, 10):
             return jsonify({"error": "Rate limit exceeded"}), 429
 
-        content = request.form.get('content')
-        file = request.files.get('file')
-        
-        attachment_url = None
-        attachment_type = None
-
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            # Make unique
-            unique_filename = f"{int(time.time())}_{random.randint(1000,9999)}_{filename}"
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], unique_filename))
-            attachment_url = unique_filename
-            attachment_type = file.content_type
-
-        if content or attachment_url:
+        content = request.get_json().get('content')
+        if content:
             execute_query(
-                'INSERT INTO messages (username, content, room_code, timestamp, attachment_url, attachment_type) VALUES (?, ?, ?, ?, ?, ?)',
-                (session['username'], content or "", room_code, datetime.now(timezone.utc), attachment_url, attachment_type)
+                'INSERT INTO messages (username, content, room_code, timestamp) VALUES (?, ?, ?, ?)',
+                (session['username'], content, room_code, datetime.now(timezone.utc))
             )
             return jsonify({"status": "sent"})
 
@@ -621,10 +521,6 @@ def api_messages():
         "messages": messages,
         "active_count": get_active_user_count()
     })
-
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 if __name__ == '__main__':
     app.run(debug=False, port=5000)

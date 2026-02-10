@@ -287,7 +287,7 @@ HTML_TEMPLATE = """
                     class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">SEND</button>
             </form>
-            <div id="status-msg" class="text-[10px] text-gray-600 mt-2 text-center uppercase tracking-widest">Each message vanishes 1h after sending.</div>
+            <div id="status-msg" class="text-[10px] text-gray-600 mt-2 text-center uppercase tracking-widest">Message vanishes in 1hr.</div>
         </div>
     </div>
 

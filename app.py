@@ -1,0 +1,630 @@
+import os
+import sqlite3
+import json
+import time
+import random
+from datetime import datetime, timedelta, timezone
+from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify, flash, send_from_directory
+from werkzeug.utils import secure_filename
+
+# Try importing psycopg2 for Vercel Postgres; pass if not found (local use)
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+
+# Configuration
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
+DB_FILE = 'anonchat.db'
+UPLOAD_FOLDER = 'static/uploads'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB limit
+
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
+
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# --- Security / Rate Limiting (In-Memory) ---
+RATE_LIMITS = {}
+
+def check_rate_limit(ident, action, limit, window):
+    """Returns True if allowed, False if limit exceeded."""
+    now = time.time()
+    if ident not in RATE_LIMITS: RATE_LIMITS[ident] = {}
+    if action not in RATE_LIMITS[ident]: RATE_LIMITS[ident][action] = []
+    
+    timestamps = [t for t in RATE_LIMITS[ident][action] if now - t < window]
+    RATE_LIMITS[ident][action] = timestamps
+    
+    if len(timestamps) >= limit: return False
+    RATE_LIMITS[ident][action].append(now)
+    return True
+
+# --- Database Wrapper (SQLite + Postgres) ---
+def get_db_connection():
+    if os.environ.get('POSTGRES_URL'):
+        if not psycopg2: raise ImportError("psycopg2 is required for Vercel")
+        conn = psycopg2.connect(os.environ['POSTGRES_URL'])
+        return conn, 'postgres'
+    else:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        return conn, 'sqlite'
+
+def execute_query(query, args=(), fetch_one=False, fetch_all=False):
+    conn, db_type = get_db_connection()
+    result = None
+    try:
+        if db_type == 'postgres':
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            query = query.replace('?', '%s')
+        else:
+            cur = conn.cursor()
+
+        cur.execute(query, args)
+        
+        if fetch_one:
+            res = cur.fetchone()
+            result = dict(res) if res else None
+        elif fetch_all:
+            res = cur.fetchall()
+            result = [dict(row) for row in res]
+        else:
+            conn.commit()
+    except Exception as e:
+        print(f"Database Error: {e}")
+        if not fetch_one and not fetch_all:
+            conn.rollback()
+    finally:
+        conn.close()
+    return result
+
+def init_db():
+    conn, db_type = get_db_connection()
+    try:
+        cur = conn.cursor()
+        pk_type = "SERIAL PRIMARY KEY" if db_type == 'postgres' else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        ts_type = "TIMESTAMP" if db_type == 'postgres' else "DATETIME"
+        
+        # Table: Rooms
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS rooms (
+                code INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at {ts_type} DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Table: Messages
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS messages (
+                id {pk_type},
+                username TEXT NOT NULL,
+                content TEXT NOT NULL,
+                room_code INTEGER,
+                timestamp {ts_type} DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Table: Active Users (For unique usernames)
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS active_users (
+                username TEXT PRIMARY KEY,
+                last_seen {ts_type} DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Table: Messages - Ensure attachment columns exist
+        # Check if columns exist by selecting from sqlite_master equivalent or just try adding them
+        # SQLite doesn't support IF NOT EXISTS for columns easily, so we just try and catch error or check pragma
+        # Actually simplest for this script: Just try adding them and ignore error if they exist.
+        try:
+            cur.execute("ALTER TABLE messages ADD COLUMN attachment_url TEXT")
+        except: pass
+        try:
+            cur.execute("ALTER TABLE messages ADD COLUMN attachment_type TEXT")
+        except: pass
+        
+        conn.commit()
+    except Exception as e:
+        print(f"DB Init Error: {e}")
+    finally:
+        conn.close()
+
+def cleanup_data():
+    """
+    1. Delete messages older than 1 hour.
+    2. Delete inactive users (inactive > 2 mins) to free up usernames.
+    """
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    two_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
+    
+    # Delete associated files for old messages
+    old_msgs = execute_query("SELECT attachment_url FROM messages WHERE timestamp < ? AND attachment_url IS NOT NULL", (one_hour_ago,), fetch_all=True)
+    if old_msgs:
+        for msg in old_msgs:
+            fpath = os.path.join(app.config['UPLOAD_FOLDER'], msg['attachment_url'])
+            if os.path.exists(fpath):
+                os.remove(fpath)
+
+    execute_query("DELETE FROM messages WHERE timestamp < ?", (one_hour_ago,))
+    execute_query("DELETE FROM rooms WHERE created_at < ?", (one_hour_ago,))
+    execute_query("DELETE FROM active_users WHERE last_seen < ?", (two_mins_ago,))
+
+def update_user_presence(username):
+    """Updates last_seen for a user. If not exists (shouldn't happen if logged in), re-inserts."""
+    now = datetime.now(timezone.utc)
+    # Try update first
+    conn, db_type = get_db_connection()
+    try:
+        if db_type == 'postgres':
+            cur = conn.cursor()
+            cur.execute("UPDATE active_users SET last_seen = %s WHERE username = %s", (now, username))
+            if cur.rowcount == 0:
+                cur.execute("INSERT INTO active_users (username, last_seen) VALUES (%s, %s) ON CONFLICT (username) DO UPDATE SET last_seen = %s", (username, now, now))
+        else:
+            cur = conn.cursor()
+            cur.execute("UPDATE active_users SET last_seen = ? WHERE username = ?", (now, username))
+            if cur.rowcount == 0:
+                cur.execute("INSERT OR REPLACE INTO active_users (username, last_seen) VALUES (?, ?)", (username, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_active_user_count():
+    """Count users active in last 30 seconds."""
+    thirty_sec_ago = datetime.now(timezone.utc) - timedelta(seconds=30)
+    res = execute_query("SELECT COUNT(*) as count FROM active_users WHERE last_seen > ?", (thirty_sec_ago,), fetch_one=True)
+    return res['count'] if res else 0
+
+# Initialize DB on load
+init_db()
+
+# --- Frontend Template ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AnonHere</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #000000; color: #ffffff; font-family: 'Courier New', monospace; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .neon-text { text-shadow: 0 0 5px rgba(255, 255, 255, 0.7); }
+        .msg-bubble { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        ::selection { background: #ffffff; color: #000000; }
+        .shake { animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both; }
+        @keyframes shake { 10%, 90% { transform: translate3d(-1px, 0, 0); } 20%, 80% { transform: translate3d(2px, 0, 0); } 30%, 50%, 70% { transform: translate3d(-4px, 0, 0); } 40%, 60% { transform: translate3d(4px, 0, 0); } }
+    </style>
+</head>
+<body class="h-screen flex flex-col items-center justify-center {{ 'p-4' if not session.get('username') or not session.get('room_type') else '' }}">
+
+    <!-- Login View -->
+    {% if not session.get('username') %}
+    <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
+        <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">ANON_HERE</h1>
+        <p class="text-gray-400 text-center mb-6 text-xs uppercase tracking-widest">Ephemeral. Encrypted. Void.</p>
+        
+        {% if get_flashed_messages() %}
+        <div class="mb-4 text-center">
+            <div class="text-red-500 text-xs border border-red-500 p-2 uppercase tracking-widest shake">
+                {{ get_flashed_messages()[0] }}
+            </div>
+        </div>
+        {% endif %}
+
+        <form action="/login" method="POST" class="space-y-4">
+            <div>
+                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Identity</label>
+                <input type="text" name="username" placeholder="NAME" required maxlength="15"
+                    class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono uppercase">
+            </div>
+            <button type="submit" class="w-full bg-white hover:bg-gray-200 text-black font-bold py-3 rounded-none uppercase tracking-widest transition duration-200 border border-white">
+                Enter
+            </button>
+        </form>
+    </div>
+
+    <!-- Lobby View -->
+    {% elif not session.get('room_type') %}
+    <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
+        <h1 class="text-xl font-bold text-center mb-2 text-white tracking-widest uppercase">AnonHere</h1>
+        <p class="text-gray-400 text-center mb-6 text-[10px] uppercase tracking-widest">Logged in as: <span class="text-white">{{ session['username'] }}</span></p>
+        
+        {% if get_flashed_messages() %}
+        <div class="mb-4 text-center">
+            <div class="text-red-500 text-xs border border-red-500 p-2 uppercase tracking-widest shake">
+                {{ get_flashed_messages()[0] }}
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="space-y-6">
+            <a href="/join_global" class="block w-full text-center bg-transparent hover:bg-white hover:text-black border border-white text-white py-3 transition uppercase tracking-widest text-sm">
+                Enter Global
+            </a>
+
+            <div class="border-t border-gray-800"></div>
+
+            <form action="/create_room" method="POST" class="space-y-2">
+                <label class="block text-[10px] uppercase tracking-widest text-gray-500">Create Private Room</label>
+                <div class="flex space-x-2">
+                    <input type="text" name="room_name" placeholder="ROOM NAME" required
+                        class="flex-1 bg-black border border-gray-600 text-white p-2 text-sm focus:border-white outline-none uppercase font-mono">
+                    <button type="submit" class="bg-gray-800 hover:bg-white hover:text-black border border-gray-600 hover:border-white text-white px-4 text-xs uppercase tracking-widest transition">
+                        CREATE
+                    </button>
+                </div>
+            </form>
+
+            <div class="border-t border-gray-800"></div>
+
+            <form action="/join_room" method="POST" class="space-y-2">
+                <label class="block text-[10px] uppercase tracking-widest text-gray-500">Join Room</label>
+                <div class="flex space-x-2">
+                    <input type="number" name="room_code" placeholder="CODE (e.g. 123456)" required
+                        class="flex-1 bg-black border border-gray-600 text-white p-2 text-sm focus:border-white outline-none font-mono">
+                    <button type="submit" class="bg-gray-800 hover:bg-white hover:text-black border border-gray-600 hover:border-white text-white px-4 text-xs uppercase tracking-widest transition">
+                        JOIN
+                    </button>
+                </div>
+            </form>
+            
+            <a href="/logout" class="block text-center text-xs text-red-500 hover:text-red-400 uppercase tracking-widest mt-4">[ DISCONNECT ]</a>
+        </div>
+    </div>
+    
+    <!-- Chat View -->
+    {% else %}
+    <div class="w-full h-full flex flex-col bg-black overflow-hidden border-x border-white/10">
+        <div class="bg-black p-4 border-b border-white flex justify-between items-center">
+            <div class="flex flex-col">
+                <div class="flex items-center space-x-2">
+                    <div class="w-2 h-2 bg-white animate-pulse"></div>
+                    <h1 class="font-bold text-white tracking-widest uppercase text-sm">
+                        {% if session.get('room_code') %}SECURE // {{ session['room_name'] }}{% else %}ANON_HERE // GLOBAL{% endif %}
+                    </h1>
+                </div>
+                <div class="flex space-x-4 mt-1">
+                    {% if session.get('room_code') %}
+                    <span class="text-[10px] text-gray-500 uppercase tracking-widest">FREQ CODE: <span class="text-white border border-gray-700 px-1">{{ session['room_code'] }}</span></span>
+                    {% endif %}
+                    <span class="text-[10px] text-gray-500 uppercase tracking-widest">ACTIVE NODES: <span id="node-count" class="text-white">1</span></span>
+                </div>
+            </div>
+            <div class="flex items-center space-x-4">
+                <span class="text-[10px] text-gray-400 uppercase tracking-wider hidden sm:inline">Node: <span class="text-white">{{ session['username'] }}</span></span>
+                <a href="/leave_room" class="text-[10px] text-gray-500 hover:text-white uppercase tracking-wider border border-gray-800 px-2 py-1 hover:border-white transition">[EXIT NET]</a>
+            </div>
+        </div>
+
+        <div id="message-container" class="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
+            <div class="text-center py-10 text-gray-600 text-xs font-mono uppercase tracking-widest">Awaiting encrypted transmission...</div>
+        </div>
+
+        <div class="bg-black p-4 border-t border-white">
+            <div id="file-preview" class="text-[10px] text-gray-500 mb-2 hidden uppercase tracking-widest pl-2"></div>
+            <form id="chat-form" class="flex space-x-2 items-center">
+                <label for="file-upload" class="cursor-pointer text-gray-400 hover:text-white p-2 border border-transparent hover:border-gray-800 transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                    </svg>
+                </label>
+                <input id="file-upload" type="file" class="hidden">
+                <input type="text" id="msg-input" placeholder="ENTER MESSAGE..." autocomplete="off"
+                    class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
+                <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">SEND</button>
+            </form>
+            <div id="status-msg" class="text-[10px] text-gray-600 mt-2 text-center uppercase tracking-widest">Each message vanishes 1h after sending.</div>
+        </div>
+    </div>
+
+    <script>
+        const container = document.getElementById('message-container');
+        const form = document.getElementById('chat-form');
+        const input = document.getElementById('msg-input');
+        const fileInput = document.getElementById('file-upload');
+        const filePreview = document.getElementById('file-preview');
+        const statusMsg = document.getElementById('status-msg');
+        const nodeCount = document.getElementById('node-count');
+        const currentUser = "{{ session['username'] }}";
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                if (file.size > 5 * 1024 * 1024) {
+                    statusMsg.textContent = "ERROR // FILE EXCEEDS 5MB LIMIT";
+                    statusMsg.classList.add('text-red-500', 'shake');
+                    setTimeout(() => statusMsg.classList.remove('shake'), 500);
+                    fileInput.value = ''; // Clear selection
+                    filePreview.classList.add('hidden');
+                    return;
+                }
+                statusMsg.textContent = "Each message vanishes 1h after sending.";
+                statusMsg.classList.remove('text-red-500');
+                
+                filePreview.textContent = `[ATTACHMENT: ${file.name}]`;
+                filePreview.classList.remove('hidden');
+            } else {
+                filePreview.classList.add('hidden');
+            }
+        });
+
+        function scrollToBottom() { container.scrollTop = container.scrollHeight; }
+
+        function escapeHtml(text) {
+            if (!text) return text;
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        async function deleteMessage(id) {
+            if(!confirm("DELETE TRANSMISSION PERMANENTLY?")) return;
+            try {
+                const res = await fetch(`/api/messages/${id}`, { method: 'DELETE' });
+                if(res.ok) fetchMessages();
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchMessages() {
+            try {
+                const response = await fetch('/api/messages');
+                if (response.status === 429) return; 
+                const data = await response.json();
+                const messages = data.messages;
+                
+                if (data.active_count !== undefined && nodeCount) nodeCount.textContent = data.active_count;
+                
+                const currentContent = messages.map(msg => msg.id).join(',');
+                if (container.dataset.hash !== currentContent) {
+                    container.dataset.hash = currentContent;
+                    if(messages.length === 0) {
+                        container.innerHTML = '<div class="text-center py-10 text-gray-600 text-xs font-mono uppercase tracking-widest">Signal Silence.</div>';
+                        return;
+                    }
+                    container.innerHTML = messages.map(msg => {
+                        const isMe = msg.username === currentUser;
+                        // Handle time: append Z if missing to assume UTC
+                        let ts = msg.timestamp;
+                        if (!ts.endsWith('Z') && !ts.includes('+')) ts += 'Z';
+                        
+                        const dateObj = new Date(ts);
+                        const timeStr = dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        
+                        const deleteBtn = isMe ? `<button onclick="deleteMessage(${msg.id})" class="ml-2 text-red-500 hover:text-red-300 text-[10px] border border-red-900 px-1 hover:border-red-500 transition uppercase">[DEL]</button>` : '';
+
+                        return `
+                            <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble group">
+                                <div class="text-[10px] text-gray-500 mb-1 px-1 font-mono uppercase flex items-center">
+                                    ${isMe ? 'YOU' : escapeHtml(msg.username)} <span class="text-gray-700 mx-1">|</span> ${timeStr} ${deleteBtn}
+                                </div>
+                                <div class="${isMe ? 'bg-white text-black border border-white' : 'bg-black text-white border border-white'} max-w-[80%] px-4 py-2 rounded-none shadow-none text-sm break-words font-mono">
+                                    ${escapeHtml(msg.content)}
+                                    ${msg.attachment_url ? (
+                                        msg.attachment_type && msg.attachment_type.startsWith('image/') ? 
+                                        `<br><a href="/uploads/${msg.attachment_url}" target="_blank"><img src="/uploads/${msg.attachment_url}" class="mt-2 max-w-full max-h-60 border border-gray-700 hover:border-white transition"></a>` :
+                                        `<br><a href="/uploads/${msg.attachment_url}" target="_blank" class="block mt-2 text-gray-400 hover:text-white text-xs border border-gray-700 p-1 w-fit uppercase">[FILE: ${msg.attachment_url.split('_').slice(2).join('_')}]</a>`
+                                    ) : ''}
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                    scrollToBottom();
+                }
+            } catch (e) { console.error("Connection lost...", e); }
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const content = input.value;
+            const file = fileInput.files[0];
+            
+            if (!content && !file) return;
+            
+            input.value = '';
+            fileInput.value = '';
+            filePreview.classList.add('hidden');
+            
+            statusMsg.textContent = "Sending encrypted transmission...";
+            statusMsg.classList.remove('text-red-500');
+            
+            const formData = new FormData();
+            formData.append('content', content);
+            if (file) {
+                formData.append('file', file);
+            }
+
+            const res = await fetch('/api/messages', {
+                method: 'POST',
+                body: formData
+            });
+            if (res.status === 429) {
+                statusMsg.textContent = "SLOW DOWN // TRANSMISSION RATE EXCEEDED";
+                statusMsg.classList.add('text-red-500', 'shake');
+                setTimeout(() => statusMsg.classList.remove('shake'), 500);
+            }
+            fetchMessages(); 
+        });
+        setInterval(fetchMessages, 2000);
+        fetchMessages();
+    </script>
+    {% endif %}
+</body>
+</html>
+"""
+
+# --- Routes ---
+
+@app.route('/')
+def home():
+    if 'username' in session and 'room_type' in session:
+        return render_template_string(HTML_TEMPLATE)
+    if 'username' in session:
+        return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/login', methods=['POST'])
+def login():
+    cleanup_data() # Opportunistic cleanup
+    username = request.form.get('username')
+    if not username: return redirect(url_for('home'))
+
+    # Check for unique username (if active in last 2 minutes)
+    two_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
+    exists = execute_query("SELECT 1 FROM active_users WHERE username = ? AND last_seen > ?", (username, two_mins_ago), fetch_one=True)
+    
+    if exists:
+        flash("IDENTITY ALREADY ACTIVE. CHOOSE ANOTHER.")
+        return redirect(url_for('home'))
+
+    # Upsert new user
+    update_user_presence(username)
+    session['username'] = username
+    return redirect(url_for('home'))
+
+@app.route('/logout')
+def logout():
+    # Remove from active users explicitly
+    if 'username' in session:
+        execute_query("DELETE FROM active_users WHERE username = ?", (session['username'],))
+    session.clear()
+    return redirect(url_for('home'))
+
+@app.route('/join_global')
+def join_global():
+    session['room_type'] = 'global'
+    session.pop('room_code', None)
+    session.pop('room_name', None)
+    return redirect(url_for('home'))
+
+@app.route('/create_room', methods=['POST'])
+def create_room():
+    room_name = request.form.get('room_name')
+    if not room_name: return redirect(url_for('home'))
+        
+    while True:
+        code = random.randint(100000, 999999)
+        exists = execute_query('SELECT 1 FROM rooms WHERE code = ?', (code,), fetch_one=True)
+        if not exists:
+            execute_query('INSERT INTO rooms (code, name) VALUES (?, ?)', (code, room_name))
+            break
+    
+    session['room_type'] = 'private'
+    session['room_code'] = code
+    session['room_name'] = room_name
+    return redirect(url_for('home'))
+
+@app.route('/join_room', methods=['POST'])
+def join_room():
+    code = request.form.get('room_code')
+    if not code: return redirect(url_for('home'))
+    
+    if not check_rate_limit(request.remote_addr, 'join_fail', 5, 60):
+        flash("SECURITY LOCKOUT // TOO MANY FAILED ATTEMPTS")
+        return redirect(url_for('home'))
+    
+    room = execute_query('SELECT * FROM rooms WHERE code = ?', (code,), fetch_one=True)
+    
+    if room:
+        session['room_type'] = 'private'
+        session['room_code'] = room['code']
+        session['room_name'] = room['name']
+    else:
+        flash("INVALID FREQUENCY CODE")
+    
+    return redirect(url_for('home'))
+
+@app.route('/leave_room')
+def leave_room():
+    session.pop('room_type', None)
+    session.pop('room_code', None)
+    session.pop('room_name', None)
+    return redirect(url_for('home'))
+
+@app.route('/api/messages/<int:msg_id>', methods=['DELETE'])
+def delete_message(msg_id):
+    if 'username' not in session: return jsonify({"error": "Unauthorized"}), 401
+    
+    # Check if message exists and belongs to user
+    msg = execute_query("SELECT * FROM messages WHERE id = ? AND username = ?", (msg_id, session['username']), fetch_one=True)
+    if msg:
+        # Delete file if exists
+        if msg.get('attachment_url'):
+            fpath = os.path.join(app.config['UPLOAD_FOLDER'], msg['attachment_url'])
+            if os.path.exists(fpath):
+                os.remove(fpath)
+
+        execute_query("DELETE FROM messages WHERE id = ?", (msg_id,))
+        return jsonify({"status": "deleted"})
+    return jsonify({"error": "Not found"}), 404
+
+@app.route('/api/messages', methods=['GET', 'POST'])
+def api_messages():
+    cleanup_data()
+    if 'username' not in session: return jsonify({"error": "Unauthorized"}), 401
+    
+    room_code = session.get('room_code')
+    update_user_presence(session['username'])
+    
+    if request.method == 'POST':
+        if not check_rate_limit(request.remote_addr, 'send_msg', 5, 10):
+            return jsonify({"error": "Rate limit exceeded"}), 429
+
+        content = request.form.get('content')
+        file = request.files.get('file')
+        
+        attachment_url = None
+        attachment_type = None
+
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            # Make unique
+            unique_filename = f"{int(time.time())}_{random.randint(1000,9999)}_{filename}"
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], unique_filename))
+            attachment_url = unique_filename
+            attachment_type = file.content_type
+
+        if content or attachment_url:
+            execute_query(
+                'INSERT INTO messages (username, content, room_code, timestamp, attachment_url, attachment_type) VALUES (?, ?, ?, ?, ?, ?)',
+                (session['username'], content or "", room_code, datetime.now(timezone.utc), attachment_url, attachment_type)
+            )
+            return jsonify({"status": "sent"})
+
+    # GET
+    if room_code:
+        messages = execute_query('SELECT * FROM messages WHERE room_code = ? ORDER BY timestamp ASC', (room_code,), fetch_all=True)
+    else:
+        messages = execute_query('SELECT * FROM messages WHERE room_code IS NULL ORDER BY timestamp ASC', fetch_all=True)
+    
+    # Convert datetime objects to string for JSON serialization
+    for msg in messages:
+        if isinstance(msg['timestamp'], datetime):
+            msg['timestamp'] = msg['timestamp'].isoformat()
+
+    return jsonify({
+        "messages": messages,
+        "active_count": get_active_user_count()
+    })
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+if __name__ == '__main__':
+    app.run(debug=False, port=5000)

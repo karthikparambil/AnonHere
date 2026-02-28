@@ -3,8 +3,14 @@ import sqlite3
 import json
 import time
 import random
+import string
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, session, redirect, url_for, render_template_string, jsonify, flash
+from werkzeug.security import check_password_hash
+
+ADMIN_USER_HASH = 'scrypt:32768:8:1$DY3lShSP5RscCd7a$35f5f3184cb15c2a542089f0e10470a1fa5b00e5701a5dff5ef7871a58a2cdc2094c22cf4d6b5f1fff890a888163ea5b174dcd0b5c2ccf4830dc0162c01893e1'
+ADMIN_PASS_HASH = 'scrypt:32768:8:1$7OdPHSTUidZN8SSD$e67b2fce64b858e4ae42e1c3bf0fa1eab5fc161050c1d6ac92e65175e424967742ad73d7077969547358070598f86677da3fc8e6d1e96f8129f9445b60d148c0'
+ADMIN_KEY_HASH = 'scrypt:32768:8:1$iFL8asFNsnds2YlG$e61de66465528811d8059f61a1a66ab10cca698f439b1c39b27b12aed069691a7982936ea6d27f6c7d9f91e684d5c0fc9674811a4aae052bbefbec733a5a407e'
 
 # Try importing psycopg2 for Vercel Postgres; pass if not found (local use)
 try:
@@ -83,7 +89,7 @@ def init_db():
         # Table: Rooms
         cur.execute(f'''
             CREATE TABLE IF NOT EXISTS rooms (
-                code INTEGER PRIMARY KEY,
+                code TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 created_at {ts_type} DEFAULT CURRENT_TIMESTAMP
             )
@@ -95,7 +101,7 @@ def init_db():
                 id {pk_type},
                 username TEXT NOT NULL,
                 content TEXT NOT NULL,
-                room_code INTEGER,
+                room_code TEXT,
                 timestamp {ts_type} DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -241,8 +247,8 @@ HTML_TEMPLATE = """
             <form action="/join_room" method="POST" class="space-y-2">
                 <label class="block text-[10px] uppercase tracking-widest text-gray-500">Join Room</label>
                 <div class="flex space-x-2">
-                    <input type="number" name="room_code" placeholder="CODE (e.g. 123456)" required
-                        class="flex-1 bg-black border border-gray-600 text-white p-2 text-sm focus:border-white outline-none font-mono">
+                    <input type="text" name="room_code" placeholder="CODE (e.g. ABCD)" required maxlength="4" pattern="[A-Za-z]{4}"
+                        class="flex-1 bg-black border border-gray-600 text-white p-2 text-sm focus:border-white outline-none font-mono uppercase">
                     <button type="submit" class="bg-gray-800 hover:bg-white hover:text-black border border-gray-600 hover:border-white text-white px-4 text-xs uppercase tracking-widest transition">
                         JOIN
                     </button>
@@ -390,6 +396,152 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# --- Admin Frontend Template ---
+ADMIN_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AnonHere - Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #000000; color: #ffffff; font-family: 'Courier New', monospace; }
+        .neon-text { text-shadow: 0 0 5px rgba(255, 255, 255, 0.7); }
+        ::selection { background: #ffffff; color: #000000; }
+        .shake { animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both; }
+        @keyframes shake { 10%, 90% { transform: translate3d(-1px, 0, 0); } 20%, 80% { transform: translate3d(2px, 0, 0); } 30%, 50%, 70% { transform: translate3d(-4px, 0, 0); } 40%, 60% { transform: translate3d(4px, 0, 0); } }
+    </style>
+</head>
+<body class="h-screen flex flex-col items-center justify-center p-4">
+
+    {% if not session.get('admin_logged_in') %}
+    <!-- Admin Login View -->
+    <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
+        <h1 class="text-3xl font-bold text-center mb-2 text-white neon-text tracking-tighter">RESTRICTED_ACCESS</h1>
+        <p class="text-gray-400 text-center mb-6 text-xs uppercase tracking-widest">Administrator Only.</p>
+        
+        {% if get_flashed_messages() %}
+        <div class="mb-4 text-center">
+            <div class="text-red-500 text-xs border border-red-500 p-2 uppercase tracking-widest shake">
+                {{ get_flashed_messages()[0] }}
+            </div>
+        </div>
+        {% endif %}
+
+        <form action="/admin/login" method="POST" class="space-y-4">
+            <div>
+                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Username</label>
+                <input type="text" name="admin_username" required
+                    class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono">
+            </div>
+            <div>
+                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Password</label>
+                <input type="password" name="admin_password" required
+                    class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono">
+            </div>
+            <div>
+                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Secret Key</label>
+                <input type="password" name="admin_key" required
+                    class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono">
+            </div>
+            <button type="submit" class="w-full bg-white hover:bg-gray-200 text-black font-bold py-3 rounded-none uppercase tracking-widest transition duration-200 border border-white">
+                Authenticate
+            </button>
+        </form>
+        <a href="/" class="block text-center text-xs text-gray-500 hover:text-white uppercase tracking-widest mt-6 transition">[ BACK TO PORTAL ]</a>
+    </div>
+
+    {% else %}
+    <!-- Admin Dashboard View -->
+    <div class="max-w-5xl w-full h-full md:h-auto md:max-h-[90vh] flex flex-col bg-black border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)] overflow-hidden">
+        <div class="bg-black p-4 border-b border-white flex justify-between items-center shrink-0">
+            <h1 class="font-bold text-white tracking-widest uppercase text-sm flex items-center">
+                <div class="w-2 h-2 bg-red-500 animate-pulse mr-2"></div> OVERSEER DASHBOARD
+            </h1>
+            <div class="flex items-center space-x-4">
+                <a href="/" class="text-[10px] text-gray-500 hover:text-white uppercase tracking-wider border border-gray-800 px-2 py-1 hover:border-white transition">[HOME]</a>
+                <a href="/admin/logout" class="text-[10px] text-red-500 hover:text-red-400 uppercase tracking-wider border border-red-900 px-2 py-1 hover:border-red-500 transition">[TERMINATE SESSION]</a>
+            </div>
+        </div>
+
+        <div class="p-6 flex-1 overflow-y-auto scrollbar-hide">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                <div class="border border-gray-600 p-4 text-center">
+                    <p class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Total Users</p>
+                    <p class="text-3xl text-white font-bold">{{ stats.user_count }}</p>
+                </div>
+                <div class="border border-gray-600 p-4 text-center">
+                    <p class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Active Rooms</p>
+                    <p class="text-3xl text-white font-bold">{{ stats.room_count }}</p>
+                </div>
+                <div class="border border-gray-600 p-4 text-center">
+                    <p class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Total Messages</p>
+                    <p class="text-3xl text-white font-bold">{{ stats.message_count }}</p>
+                </div>
+            </div>
+
+            <h2 class="text-xs text-white uppercase tracking-widest mb-4 border-b border-gray-800 pb-2">Active Private Rooms</h2>
+            
+            {% if rooms %}
+            <div class="overflow-x-auto mb-8">
+                <table class="w-full text-left text-xs">
+                    <thead>
+                        <tr class="text-gray-500 border-b border-gray-800 tracking-widest uppercase">
+                            <th class="p-2 font-normal">Code</th>
+                            <th class="p-2 font-normal">Name</th>
+                            <th class="p-2 font-normal whitespace-nowrap">Created At</th>
+                            <th class="p-2 font-normal">Messages</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for room in rooms %}
+                        <tr class="border-b border-gray-800 hover:bg-gray-900 transition">
+                            <td class="p-2 text-white font-bold">{{ room.code }}</td>
+                            <td class="p-2 text-gray-300">{{ room.name }}</td>
+                            <td class="p-2 text-gray-500 whitespace-nowrap">{{ room.created_at }}</td>
+                            <td class="p-2 text-gray-400">{{ room.msg_count }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-gray-600 text-[10px] uppercase tracking-widest mb-8">No active private rooms.</p>
+            {% endif %}
+            
+            <h2 class="text-xs text-white uppercase tracking-widest mb-4 border-b border-gray-800 pb-2">Active Users (last 2 mins)</h2>
+            
+            {% if users %}
+            <div class="overflow-x-auto mb-4">
+                <table class="w-full text-left text-xs">
+                    <thead>
+                        <tr class="text-gray-500 border-b border-gray-800 tracking-widest uppercase">
+                            <th class="p-2 font-normal">Username</th>
+                            <th class="p-2 font-normal">Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr class="border-b border-gray-800 hover:bg-gray-900 transition">
+                            <td class="p-2 text-white">{{ user.username }}</td>
+                            <td class="p-2 text-gray-500">{{ user.last_seen }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-gray-600 text-[10px] uppercase tracking-widest">No active users.</p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+</body>
+</html>
+"""
+
 # --- Routes ---
 
 @app.route('/')
@@ -440,7 +592,7 @@ def create_room():
     if not room_name: return redirect(url_for('home'))
         
     while True:
-        code = random.randint(100000, 999999)
+        code = ''.join(random.choices(string.ascii_uppercase, k=4))
         exists = execute_query('SELECT 1 FROM rooms WHERE code = ?', (code,), fetch_one=True)
         if not exists:
             execute_query('INSERT INTO rooms (code, name) VALUES (?, ?)', (code, room_name))
@@ -455,6 +607,7 @@ def create_room():
 def join_room():
     code = request.form.get('room_code')
     if not code: return redirect(url_for('home'))
+    code = code.upper()
     
     if not check_rate_limit(request.remote_addr, 'join_fail', 5, 60):
         flash("SECURITY LOCKOUT // TOO MANY FAILED ATTEMPTS")
@@ -521,6 +674,61 @@ def api_messages():
         "messages": messages,
         "active_count": get_active_user_count()
     })
+
+@app.route('/admin')
+def admin_dashboard():
+    if not session.get('admin_logged_in'):
+        return render_template_string(ADMIN_TEMPLATE)
+    
+    # Fetch stats
+    stats = {}
+    
+    # Active users
+    users = execute_query("SELECT * FROM active_users ORDER BY last_seen DESC", fetch_all=True)
+    stats['user_count'] = len(users) if users else 0
+    
+    # Private Rooms
+    rooms = execute_query('''
+        SELECT r.code, r.name, r.created_at, COUNT(m.id) as msg_count 
+        FROM rooms r 
+        LEFT JOIN messages m ON r.code = m.room_code 
+        GROUP BY r.code, r.name, r.created_at
+        ORDER BY r.created_at DESC
+    ''', fetch_all=True)
+    stats['room_count'] = len(rooms) if rooms else 0
+    
+    # Total messages
+    msg_res = execute_query("SELECT COUNT(*) as count FROM messages", fetch_one=True)
+    if msg_res and 'count' in msg_res:
+        stats['message_count'] = msg_res['count']
+    else:
+        stats['message_count'] = 0
+        
+    return render_template_string(ADMIN_TEMPLATE, stats=stats, rooms=rooms, users=users)
+
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    if not check_rate_limit(request.remote_addr, 'admin_login_fail', 5, 300):
+        flash("SECURITY LOCKOUT // RATE LIMIT EXCEEDED")
+        return redirect(url_for('admin_dashboard'))
+
+    username = request.form.get('admin_username', '')
+    password = request.form.get('admin_password', '')
+    key = request.form.get('admin_key', '')
+    
+    if (check_password_hash(ADMIN_USER_HASH, username) and 
+        check_password_hash(ADMIN_PASS_HASH, password) and 
+        check_password_hash(ADMIN_KEY_HASH, key)):
+        session['admin_logged_in'] = True
+        return redirect(url_for('admin_dashboard'))
+    
+    flash("ACCESS DENIED // INVALID CREDENTIALS")
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return redirect(url_for('admin_dashboard'))
 
 if __name__ == '__main__':
     app.run(debug=False, port=5000)

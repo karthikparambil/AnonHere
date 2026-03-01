@@ -176,7 +176,7 @@ HTML_TEMPLATE = """
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
         .neon-text { text-shadow: 0 0 5px rgba(255, 255, 255, 0.7); }
         .msg-bubble { animation: fadeIn 0.3s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
         ::selection { background: #ffffff; color: #000000; }
         .shake { animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both; }
         @keyframes shake { 10%, 90% { transform: translate3d(-1px, 0, 0); } 20%, 80% { transform: translate3d(2px, 0, 0); } 30%, 50%, 70% { transform: translate3d(-4px, 0, 0); } 40%, 60% { transform: translate3d(4px, 0, 0); } }
@@ -200,7 +200,7 @@ HTML_TEMPLATE = """
 
         <form action="/login" method="POST" class="space-y-4">
             <div>
-                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Identity</label>
+                <label class="block text-[12px] uppercase tracking-widest text-gray-500 mb-1">Identity</label>
                 <input type="text" name="username" placeholder="NAME" required maxlength="15"
                     class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono uppercase">
             </div>
@@ -214,7 +214,7 @@ HTML_TEMPLATE = """
     {% elif not session.get('room_type') %}
     <div class="max-w-md w-full bg-black p-8 border border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]">
         <h1 class="text-xl font-bold text-center mb-2 text-white tracking-widest uppercase">AnonHere</h1>
-        <p class="text-gray-400 text-center mb-6 text-[10px] uppercase tracking-widest">Logged in as: <span class="text-white">{{ session['username'] }}</span></p>
+        <p class="text-gray-400 text-center mb-6 text-[12px] uppercase tracking-widest">Logged in as: <span class="text-white">{{ session['username'] }}</span></p>
         
         {% if get_flashed_messages() %}
         <div class="mb-4 text-center">
@@ -232,7 +232,7 @@ HTML_TEMPLATE = """
             <div class="border-t border-gray-800"></div>
 
             <form action="/create_room" method="POST" class="space-y-2">
-                <label class="block text-[10px] uppercase tracking-widest text-gray-500">Create Private Room</label>
+                <label class="block text-[12px] uppercase tracking-widest text-gray-500">Create Private Room</label>
                 <div class="flex space-x-2">
                     <input type="text" name="room_name" placeholder="ROOM NAME" required
                         class="flex-1 bg-black border border-gray-600 text-white p-2 text-sm focus:border-white outline-none uppercase font-mono">
@@ -245,7 +245,7 @@ HTML_TEMPLATE = """
             <div class="border-t border-gray-800"></div>
 
             <form action="/join_room" method="POST" class="space-y-2">
-                <label class="block text-[10px] uppercase tracking-widest text-gray-500">Join Room</label>
+                <label class="block text-[12px] uppercase tracking-widest text-gray-500">Join Room</label>
                 <div class="flex space-x-2">
                     <input type="text" name="room_code" placeholder="CODE (e.g. ABCD)" required maxlength="4" pattern="[A-Za-z]{4}"
                         class="flex-1 bg-black border border-gray-600 text-white p-2 text-sm focus:border-white outline-none font-mono uppercase">
@@ -272,14 +272,14 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="flex space-x-4 mt-1">
                     {% if session.get('room_code') %}
-                    <span class="text-[10px] text-gray-500 uppercase tracking-widest">FREQ CODE: <span class="text-white border border-gray-700 px-1">{{ session['room_code'] }}</span></span>
+                    <span class="text-[12px] text-gray-500 uppercase tracking-widest">FREQ CODE: <span class="text-white border border-gray-700 px-1">{{ session['room_code'] }}</span></span>
                     {% endif %}
-                    <span class="text-[10px] text-gray-500 uppercase tracking-widest">ACTIVE NODES: <span id="node-count" class="text-white">1</span></span>
+                    <span class="text-[12px] text-gray-500 uppercase tracking-widest">ACTIVE NODES: <span id="node-count" class="text-white">1</span></span>
                 </div>
             </div>
             <div class="flex items-center space-x-4">
-                <span class="text-[10px] text-gray-400 uppercase tracking-wider hidden sm:inline">Node: <span class="text-white">{{ session['username'] }}</span></span>
-                <a href="/leave_room" class="text-[10px] text-gray-500 hover:text-white uppercase tracking-wider border border-gray-800 px-2 py-1 hover:border-white transition">[EXIT NET]</a>
+                <span class="text-[12px] text-gray-400 uppercase tracking-wider hidden sm:inline">Node: <span class="text-white">{{ session['username'] }}</span></span>
+                <a href="/leave_room" class="text-[12px] text-gray-500 hover:text-white uppercase tracking-wider border border-gray-800 px-2 py-1 hover:border-white transition">[EXIT NET]</a>
             </div>
         </div>
 
@@ -293,7 +293,7 @@ HTML_TEMPLATE = """
                     class="flex-1 bg-black border border-gray-600 text-white p-3 rounded-none focus:border-white focus:ring-0 outline-none font-mono">
                 <button type="submit" class="bg-white hover:bg-gray-200 text-black px-6 py-2 rounded-none font-bold uppercase tracking-widest transition">SEND</button>
             </form>
-            <div id="status-msg" class="text-[10px] text-gray-600 mt-2 text-center uppercase tracking-widest">Message vanishes in 1hr.</div>
+            <div id="status-msg" class="text-[12px] text-gray-600 mt-2 text-center uppercase tracking-widest">Message vanishes in 1hr.</div>
         </div>
     </div>
 
@@ -350,11 +350,11 @@ HTML_TEMPLATE = """
                         const dateObj = new Date(ts);
                         const timeStr = dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
                         
-                        const deleteBtn = isMe ? `<button onclick="deleteMessage(${msg.id})" class="ml-2 text-red-500 hover:text-red-300 text-[10px] border border-red-900 px-1 hover:border-red-500 transition uppercase">[DEL]</button>` : '';
+                        const deleteBtn = isMe ? `<button onclick="deleteMessage(${msg.id})" class="ml-2 text-red-500 hover:text-red-300 text-[12px] border border-red-900 px-1 hover:border-red-500 transition uppercase">[DEL]</button>` : '';
 
                         return `
                             <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'} msg-bubble group">
-                                <div class="text-[10px] text-gray-500 mb-1 px-1 font-mono uppercase flex items-center">
+                                <div class="text-[12px] text-gray-500 mb-1 px-1 font-mono uppercase flex items-center">
                                     ${isMe ? 'YOU' : escapeHtml(msg.username)} <span class="text-gray-700 mx-1">|</span> ${timeStr} ${deleteBtn}
                                 </div>
                                 <div class="${isMe ? 'bg-white text-black border border-white' : 'bg-black text-white border border-white'} max-w-[80%] px-4 py-2 rounded-none shadow-none text-sm break-words font-mono">
@@ -431,17 +431,17 @@ ADMIN_TEMPLATE = """
 
         <form action="/admin/login" method="POST" class="space-y-4">
             <div>
-                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Username</label>
+                <label class="block text-[12px] uppercase tracking-widest text-gray-500 mb-1">Username</label>
                 <input type="text" name="admin_username" required
                     class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono">
             </div>
             <div>
-                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Password</label>
+                <label class="block text-[12px] uppercase tracking-widest text-gray-500 mb-1">Password</label>
                 <input type="password" name="admin_password" required
                     class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono">
             </div>
             <div>
-                <label class="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Secret Key</label>
+                <label class="block text-[12px] uppercase tracking-widest text-gray-500 mb-1">Secret Key</label>
                 <input type="password" name="admin_key" required
                     class="w-full bg-black border border-gray-600 text-white p-3 rounded-none focus:outline-none focus:border-white transition font-mono">
             </div>
@@ -460,23 +460,23 @@ ADMIN_TEMPLATE = """
                 <div class="w-2 h-2 bg-red-500 animate-pulse mr-2"></div> OVERSEER DASHBOARD
             </h1>
             <div class="flex items-center space-x-4">
-                <a href="/" class="text-[10px] text-gray-500 hover:text-white uppercase tracking-wider border border-gray-800 px-2 py-1 hover:border-white transition">[HOME]</a>
-                <a href="/admin/logout" class="text-[10px] text-red-500 hover:text-red-400 uppercase tracking-wider border border-red-900 px-2 py-1 hover:border-red-500 transition">[TERMINATE SESSION]</a>
+                <a href="/" class="text-[12px] text-gray-500 hover:text-white uppercase tracking-wider border border-gray-800 px-2 py-1 hover:border-white transition">[HOME]</a>
+                <a href="/admin/logout" class="text-[12px] text-red-500 hover:text-red-400 uppercase tracking-wider border border-red-900 px-2 py-1 hover:border-red-500 transition">[TERMINATE SESSION]</a>
             </div>
         </div>
 
         <div class="p-6 flex-1 overflow-y-auto scrollbar-hide">
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
                 <div class="border border-gray-600 p-4 text-center">
-                    <p class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Total Users</p>
+                    <p class="text-[12px] text-gray-500 uppercase tracking-widest mb-1">Total Users</p>
                     <p class="text-3xl text-white font-bold">{{ stats.user_count }}</p>
                 </div>
                 <div class="border border-gray-600 p-4 text-center">
-                    <p class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Active Rooms</p>
+                    <p class="text-[12px] text-gray-500 uppercase tracking-widest mb-1">Active Rooms</p>
                     <p class="text-3xl text-white font-bold">{{ stats.room_count }}</p>
                 </div>
                 <div class="border border-gray-600 p-4 text-center">
-                    <p class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Total Messages</p>
+                    <p class="text-[12px] text-gray-500 uppercase tracking-widest mb-1">Total Messages</p>
                     <p class="text-3xl text-white font-bold">{{ stats.message_count }}</p>
                 </div>
             </div>
@@ -507,7 +507,7 @@ ADMIN_TEMPLATE = """
                 </table>
             </div>
             {% else %}
-            <p class="text-gray-600 text-[10px] uppercase tracking-widest mb-8">No active private rooms.</p>
+            <p class="text-gray-600 text-[12px] uppercase tracking-widest mb-8">No active private rooms.</p>
             {% endif %}
             
             <h2 class="text-xs text-white uppercase tracking-widest mb-4 border-b border-gray-800 pb-2">Active Users (last 2 mins)</h2>
@@ -532,7 +532,7 @@ ADMIN_TEMPLATE = """
                 </table>
             </div>
             {% else %}
-            <p class="text-gray-600 text-[10px] uppercase tracking-widest">No active users.</p>
+            <p class="text-gray-600 text-[12px] uppercase tracking-widest">No active users.</p>
             {% endif %}
         </div>
     </div>

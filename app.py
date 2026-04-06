@@ -22,6 +22,7 @@ except ImportError:
 # Configuration
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
+app.permanent_session_lifetime = timedelta(hours=1)
 DB_FILE = 'anonchat.db'
 
 # --- Security / Rate Limiting (In-Memory) ---
@@ -169,7 +170,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AnonHere</title>
-    <link rel="icon" href="assets/favicon.ico">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #000000; color: #ffffff; font-family: 'Courier New', monospace; }
@@ -569,6 +570,7 @@ def login():
 
     # Upsert new user
     update_user_presence(username)
+    session.permanent = True
     session['username'] = username
     return redirect(url_for('home'))
 
@@ -720,6 +722,7 @@ def admin_login():
     if (check_password_hash(ADMIN_USER_HASH, username) and 
         check_password_hash(ADMIN_PASS_HASH, password) and 
         check_password_hash(ADMIN_KEY_HASH, key)):
+        session.permanent = True
         session['admin_logged_in'] = True
         return redirect(url_for('admin_dashboard'))
     

@@ -494,6 +494,7 @@ ADMIN_TEMPLATE = """
                             <th class="p-2 font-normal">Name</th>
                             <th class="p-2 font-normal whitespace-nowrap">Created At</th>
                             <th class="p-2 font-normal">Messages</th>
+                            <th class="p-2 font-normal text-right">Action</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -503,6 +504,11 @@ ADMIN_TEMPLATE = """
                             <td class="p-2 text-gray-300">{{ room.name }}</td>
                             <td class="p-2 text-gray-500 whitespace-nowrap">{{ room.created_at }}</td>
                             <td class="p-2 text-gray-400">{{ room.msg_count }}</td>
+                            <td class="p-2 text-right">
+                                <a href="/admin/deactivate_room/{{ room.code }}" 
+                                   onclick="return confirm('DEACTIVATE ROOM {{ room.code }} PERMANENTLY?')"
+                                   class="text-red-500 hover:text-red-400 uppercase tracking-widest">[ DEACTIVATE ]</a>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -732,6 +738,16 @@ def admin_login():
 @app.route('/admin/logout')
 def admin_logout():
     session.pop('admin_logged_in', None)
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/deactivate_room/<code>')
+def admin_deactivate_room(code):
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_dashboard'))
+    
+    execute_query("DELETE FROM messages WHERE room_code = ?", (code,))
+    execute_query("DELETE FROM rooms WHERE code = ?", (code,))
+    flash(f"ROOM {code} DEACTIVATED")
     return redirect(url_for('admin_dashboard'))
 
 if __name__ == '__main__':
